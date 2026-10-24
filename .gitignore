@@ -1,0 +1,69 @@
+# Pascal VOC data: large files and original annotations/images
+VOCdevkit/VOC2012/
+data/
+
+# VOC-style dataset subdirectories, wherever they are placed
+**/Annotations/
+**/JPEGImages/
+**/SegmentationClass/
+**/SegmentationObject/
+**/ImageSets/
+
+# Extra test images supplied by the course
+test/
+test_set/
+dataset2/
+test400/
+
+# Pretrained model weights and downloaded archives
+weights/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.tar
+*.tar.gz
+*.zip
+
+# Training outputs and experiment artifacts
+outputs/
+experiments/
+logs/
+runs/
+tensorboard/
+wandb/
+*.log
+
+# Generated prediction masks and visualizations
+predictions/
+predict/
+previews/
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+.conda/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.vs/
+*.suo
+*.user
+Thumbs.db
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+#report
+*.docx
