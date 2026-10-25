@@ -1,47 +1,74 @@
-from pathlib import Path
+"""Audit the raw VOC segmentation splits without modifying the dataset."""
+
+import json
 from collections import Counter
-from PIL import Image
+from pathlib import Path
+
 import numpy as np
+from PIL import Image
 
-project = Path(r"D:\学习记录\3-1\AI_technology\code\Pascal-VOC2012-Semantic-Segmentation")
-voc = project / "VOCdevkit" / "VOC2012"
+from src.data_preprocessing import IGNORE_INDEX, NUM_CLASSES
 
-train_ids = [
-    x.strip()
-    for x in (voc / "ImageSets" / "Segmentation" / "train.txt").read_text().splitlines()
-    if x.strip()
-]
+PROJECT = Path(__file__).resolve().parent
+VOC = PROJECT / "VOCdevkit" / "VOC2012"
+TEST_IMAGES = PROJECT / "test400" / "images"
+OUTPUT = PROJECT / "experiments" / "data_check" / "dataset_audit.json"
 
-val_ids = [
-    x.strip()
-    for x in (voc / "ImageSets" / "Segmentation" / "val.txt").read_text().splitlines()
-    if x.strip()
-]
 
-all_values = Counter()
-invalid_files = []
-size_mismatch = []
+def read_ids(split: str) -> list[str]:
+    path = VOC / "ImageSets" / "Segmentation" / f"{split}.txt"
+    ids = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"Duplicate IDs in {path}")
+    return ids
 
-for sample_id in train_ids + val_ids:
-    image_path = voc / "JPEGImages" / f"{sample_id}.jpg"
-    mask_path = voc / "SegmentationClass" / f"{sample_id}.png"
 
-    image = Image.open(image_path)
-    mask = Image.open(mask_path)
+def inspect_split(ids: list[str]) -> dict:
+    issues: list[str] = []
+    counts: Counter[int] = Counter()
+    for sample_id in ids:
+        image_path = VOC / "JPEGImages" / f"{sample_id}.jpg"
+        mask_path = VOC / "SegmentationClass" / f"{sample_id}.png"
+        if not image_path.is_file() or not mask_path.is_file():
+            issues.append(f"{sample_id}: missing image or mask")
+            continue
+        with Image.open(image_path) as image, Image.open(mask_path) as mask:
+            if image.size != mask.size:
+                issues.append(f"{sample_id}: size mismatch {image.size} != {mask.size}")
+            if mask.mode not in ("P", "L"):
+                issues.append(f"{sample_id}: unsupported mask mode {mask.mode}")
+                continue
+            values, frequencies = np.unique(np.asarray(mask), return_counts=True)
+            for value, frequency in zip(values.tolist(), frequencies.tolist()):
+                counts[value] += frequency
+                if value not in range(NUM_CLASSES) and value != IGNORE_INDEX:
+                    issues.append(f"{sample_id}: invalid label {value}")
+    return {
+        "samples": len(ids),
+        "label_values": sorted(counts),
+        "pixel_counts": {str(k): v for k, v in sorted(counts.items())},
+        "issues": issues,
+    }
 
-    if image.size != mask.size:
-        size_mismatch.append(sample_id)
 
-    values = np.array(mask)
-    all_values.update(values.reshape(-1).tolist())
+def main() -> None:
+    train_ids, val_ids = read_ids("train"), read_ids("val")
+    report = {
+        "voc_root": str(VOC),
+        "test_images": str(TEST_IMAGES),
+        "test_image_count": len(list(TEST_IMAGES.glob("*.jpg"))),
+        "train_val_overlap": sorted(set(train_ids) & set(val_ids)),
+        "train": inspect_split(train_ids),
+        "val": inspect_split(val_ids),
+    }
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"train={len(train_ids)}, val={len(val_ids)}, test={report['test_image_count']}")
+    print(f"overlap={len(report['train_val_overlap'])}, train issues={len(report['train']['issues'])}, val issues={len(report['val']['issues'])}")
+    print(f"Details: {OUTPUT}")
+    if report["train_val_overlap"] or report["train"]["issues"] or report["val"]["issues"]:
+        raise SystemExit("Dataset audit found issues; see the report")
 
-    invalid = set(np.unique(values).tolist()) - set(range(21)) - {255}
-    if invalid:
-        invalid_files.append((sample_id, sorted(invalid)))
 
-print("Train:", len(train_ids))
-print("Val:", len(val_ids))
-print("Most common label values:", all_values.most_common())
-print("All label values:", sorted(all_values))
-print("Invalid label files:", invalid_files[:10])
-print("Size mismatches:", size_mismatch[:10])
+if __name__ == "__main__":
+    main()
