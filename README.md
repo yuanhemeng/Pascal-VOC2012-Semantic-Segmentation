@@ -226,24 +226,25 @@ experiments/
 
 ### 当前配置
 
-- 模型：待填写，尚未开始训练
-- 骨干网络：待填写
-- 输入尺寸：384 × 384
+- 模型：DeepLabV3-MobileNetV3-Large，已完成10轮 CPU 全量基线训练
+- 骨干网络：CPU 基线使用 MobileNetV3-Large（ImageNet 预训练）
+- 输入尺寸：CPU 基线使用 256 × 256；数据管线默认值为 384 × 384
 - 训练集数量：1464
 - 验证集数量：1449
 - 测试集数量：400
-- 损失函数：待填写
-- 优化器：待填写
+- 损失函数：交叉熵，忽略标签 255
+- 优化器：AdamW
 - 随机种子：预处理检查使用42
 - 数据审计：通过，训练/验证无重叠，图片标签无缺失或尺寸不一致
 - 数据管线：已完成并通过4项单元检查
 - 单批次训练检查：已用随机初始化的 DeepLabV3-ResNet50 跑通一次前向、交叉熵、反向传播和参数更新；不代表正式训练结果
+- 基线训练结果：第8轮最佳验证 mIoU 为44.36%，像素准确率83.33%；第10轮 mIoU 为44.00%。每轮训练1464张、验证1449张，无局部批次上限
 
 ### 实验结果摘要
 
 | 实验编号 | 主要改动 | 最佳轮次 | 验证 mIoU | 像素准确率 | 是否作为最终方案 | 备注 |
 |---|---|---:|---:|---:|---|---|
-| baseline_01 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 |
+| baseline_cpu_01 | DeepLabV3-MobileNetV3，冻结预训练骨干，256像素，CPU | 8 | 44.36% | 83.33% | 当前基线 | 10轮完整训练；测试集尚未推理 |
 
 ### 待解决问题
 
@@ -251,9 +252,45 @@ experiments/
 - [ ] 填写最终训练环境信息
 - [x] 完成数据读取、预处理和训练增强
 - [x] 跑通单批次模型更新（`python check_one_batch.py --device cpu`）
-- [ ] 完成基线训练
-- [ ] 接入 TensorBoard
+- [x] 运行固定小批量过拟合检查（12次更新，loss从3.0532降至0.5152）
+- [x] 完成10轮 CPU 全量基线训练
+- [x] 接入 TensorBoard 并保存训练事件
 - [ ] 完成至少一项对照改进实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字
+
+## 11. 基线训练入口
+
+先运行固定小批量检查，再启动正式训练。小批量检查使用随机初始化网络，目的只是确认同一批图片的损失能够下降：
+
+```powershell
+python check_small_overfit.py --device cpu
+```
+
+CPU 正式基线仍使用 DeepLabV3，但选用计算量较小的 MobileNetV3-Large 骨干。预训练权重已缓存在 git 忽略的 `weights/torch/` 中。每轮遍历完整的1464张训练图，并对1449张验证图计算 mIoU。已完成的 `baseline_cpu_01` 共10轮，累计训练与验证约44分钟。要从头开始一组新的实验，使用新的目录：
+
+```powershell
+conda activate voc-seg-cpu
+python train_baseline.py --device cpu --backbone mobilenet_v3_large --freeze-backbone --image-size 256 --batch-size 2 --lr 0.001 --epochs 10 --log-every 20 --output-dir experiments/baseline_cpu_02
+```
+
+如果想把已完成的 `baseline_cpu_01` 从10轮继续到总共20轮，保持其余参数一致，指定同一实验目录和 `last.pth`：
+
+```powershell
+python train_baseline.py --device cpu --backbone mobilenet_v3_large --freeze-backbone --image-size 256 --batch-size 2 --lr 0.001 --epochs 20 --log-every 20 --output-dir experiments/baseline_cpu_01 --resume experiments/baseline_cpu_01/last.pth
+```
+
+这里的 `--epochs 20` 表示训练完成时总共20轮，不是额外再训练20轮。CPU 训练完全可行，但完成多轮仍需较长时间。调试整条训练和验证链路可运行：
+
+```powershell
+python train_baseline.py --device cpu --random-init --image-size 128 --batch-size 2 --epochs 1 --max-train-batches 1 --max-val-batches 1 --no-checkpoints --output-dir experiments/debug_01
+```
+
+每次新实验使用新的输出目录。正式运行目录将保存 `config.json`、`command.txt`、`command_history.txt`、`metrics.csv`、`tensorboard/`、`best.pth`、`last.pth` 和 `best_per_class_iou.json`。`metrics.csv` 的 `val_miou` 是 0～1 的数值，乘以100才是百分比；`best.pth` 按完整验证集 mIoU 选择。带 `--max-*-batches` 的运行会在 CSV 中标为 `partial_run=True`，且不保存权重。
+
+查看训练曲线：
+
+```powershell
+tensorboard --logdir experiments/baseline_cpu_01/tensorboard
+```
