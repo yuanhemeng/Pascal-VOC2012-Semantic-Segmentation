@@ -46,6 +46,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=positive_int, default=2)
     parser.add_argument("--image-size", type=positive_int, default=IMAGE_SIZE)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("none", "cosine"),
+        default="none",
+        help="Learning-rate schedule; cosine decays from --lr to --min-lr over all epochs",
+    )
+    parser.add_argument("--min-lr", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -65,6 +72,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("num-workers must be nonnegative and lr must be positive and finite")
     if not math.isfinite(args.weight_decay) or args.weight_decay < 0:
         parser.error("weight-decay must be nonnegative and finite")
+    if not math.isfinite(args.min_lr) or args.min_lr < 0 or args.min_lr > args.lr:
+        parser.error("min-lr must be finite, nonnegative, and no greater than lr")
     if (args.max_train_batches or args.max_val_batches) and not args.no_checkpoints:
         parser.error("Debug batch limits require --no-checkpoints to avoid saving partial-run weights")
     if args.resume and args.no_checkpoints:
@@ -153,7 +162,7 @@ def validate(model, loader, device, max_batches, writer, epoch):
     return loss_total / valid_total, metrics, images_seen
 
 
-def save_checkpoint(path, model, optimizer, epoch, best_miou, config):
+def save_checkpoint(path, model, optimizer, scheduler, epoch, best_miou, config):
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save({
         "epoch": epoch,
@@ -161,6 +170,7 @@ def save_checkpoint(path, model, optimizer, epoch, best_miou, config):
         "config": config,
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "torch_rng_state": torch.get_rng_state(),
         "python_rng_state": random.getstate(),
         "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -193,7 +203,8 @@ def main() -> None:
         "pretrained_backbone": not args.random_init,
         "freeze_backbone": args.freeze_backbone,
         "image_size": args.image_size, "batch_size": args.batch_size,
-        "lr": args.lr, "weight_decay": args.weight_decay, "seed": args.seed,
+        "lr": args.lr, "lr_scheduler": args.lr_scheduler, "min_lr": args.min_lr,
+        "weight_decay": args.weight_decay, "seed": args.seed,
         "train_images": len(train_data), "val_images": len(val_data),
         "max_train_batches": args.max_train_batches, "max_val_batches": args.max_val_batches,
         "device": str(device), "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
@@ -220,6 +231,11 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+    scheduler = None
+    if args.lr_scheduler == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.min_lr,
+        )
     start_epoch, best_miou = 1, -1.0
     if args.resume:
         # The first checkpoint may contain TorchVersion rather than a plain str.
@@ -229,6 +245,8 @@ def main() -> None:
             raise ValueError("Checkpoint configuration does not match this run")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if scheduler is not None and checkpoint.get("scheduler") is not None:
+            scheduler.load_state_dict(checkpoint["scheduler"])
         torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
         random.setstate(checkpoint["python_rng_state"])
         if device.type == "cuda" and checkpoint["cuda_rng_state"] is not None:
@@ -275,12 +293,14 @@ def main() -> None:
                 writer.add_scalar("train/learning_rate", record["learning_rate"], epoch)
                 writer.flush()
                 print(f"epoch {epoch}/{args.epochs}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, mIoU={miou:.4f}, accuracy={accuracy:.4f}, val_images={val_seen}, partial={partial}", flush=True)
+                if scheduler is not None:
+                    scheduler.step()
                 if not args.no_checkpoints:
                     improved = miou > best_miou
                     best_miou = max(best_miou, miou)
-                    save_checkpoint(args.output_dir / "last.pth", model, optimizer, epoch, best_miou, config)
+                    save_checkpoint(args.output_dir / "last.pth", model, optimizer, scheduler, epoch, best_miou, config)
                     if improved:
-                        save_checkpoint(args.output_dir / "best.pth", model, optimizer, epoch, best_miou, config)
+                        save_checkpoint(args.output_dir / "best.pth", model, optimizer, scheduler, epoch, best_miou, config)
                         scores = metrics.per_class_iou().tolist()
                         (args.output_dir / "best_per_class_iou.json").write_text(
                             json.dumps({str(i): score if math.isfinite(score) else None for i, score in enumerate(scores)}, indent=2),

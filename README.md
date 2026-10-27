@@ -226,7 +226,7 @@ experiments/
 
 ### 当前配置
 
-- 模型：DeepLabV3-MobileNetV3-Large，已完成10轮 CPU 全量基线训练
+- 模型：DeepLabV3-MobileNetV3-Large，已完成20轮 CPU 全量基线训练
 - 骨干网络：CPU 基线使用 MobileNetV3-Large（ImageNet 预训练）
 - 输入尺寸：CPU 基线使用 256 × 256；数据管线默认值为 384 × 384
 - 训练集数量：1464
@@ -238,24 +238,26 @@ experiments/
 - 数据审计：通过，训练/验证无重叠，图片标签无缺失或尺寸不一致
 - 数据管线：已完成并通过4项单元检查
 - 单批次训练检查：已用随机初始化的 DeepLabV3-ResNet50 跑通一次前向、交叉熵、反向传播和参数更新；不代表正式训练结果
-- 基线训练结果：第8轮最佳验证 mIoU 为44.36%，像素准确率83.33%；第10轮 mIoU 为44.00%。每轮训练1464张、验证1449张，无局部批次上限
+- 基线训练结果：第19轮最佳验证 mIoU 为45.04%，像素准确率82.41%；第20轮 mIoU 为43.69%。每轮训练1464张、验证1449张，无局部批次上限
+- 学习率衰减结果：`lr_schedule_01` 使用余弦退火，初始学习率0.001、最小学习率0.00001；第20轮最佳验证 mIoU 为47.93%，像素准确率84.42%，较固定学习率基线提高2.89个百分点
 
 ### 实验结果摘要
 
 | 实验编号 | 主要改动 | 最佳轮次 | 验证 mIoU | 像素准确率 | 是否作为最终方案 | 备注 |
 |---|---|---:|---:|---:|---|---|
-| baseline_cpu_01 | DeepLabV3-MobileNetV3，冻结预训练骨干，256像素，CPU | 8 | 44.36% | 83.33% | 当前基线 | 10轮完整训练；测试集尚未推理 |
+| baseline_cpu_01 | DeepLabV3-MobileNetV3，冻结预训练骨干，256像素，CPU | 19 | 45.04% | 82.41% | 当前基线 | 20轮完整训练；测试集尚未推理 |
+| lr_schedule_01 | 基线配置 + 余弦退火学习率 | 20 | 47.93% | 84.42% | 当前最佳 | 20轮完整训练；测试集尚未推理 |
 
 ### 待解决问题
 
 - [x] 核对数据集数量、标签和划分
-- [ ] 填写最终训练环境信息
+- [x] 在实验 `config.json` 中记录 CPU 基线环境和训练参数
 - [x] 完成数据读取、预处理和训练增强
 - [x] 跑通单批次模型更新（`python check_one_batch.py --device cpu`）
 - [x] 运行固定小批量过拟合检查（12次更新，loss从3.0532降至0.5152）
-- [x] 完成10轮 CPU 全量基线训练
+- [x] 完成20轮 CPU 全量基线训练
 - [x] 接入 TensorBoard 并保存训练事件
-- [ ] 完成至少一项对照改进实验
+- [x] 完成学习率衰减对照实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字
@@ -268,20 +270,22 @@ experiments/
 python check_small_overfit.py --device cpu
 ```
 
-CPU 正式基线仍使用 DeepLabV3，但选用计算量较小的 MobileNetV3-Large 骨干。预训练权重已缓存在 git 忽略的 `weights/torch/` 中。每轮遍历完整的1464张训练图，并对1449张验证图计算 mIoU。已完成的 `baseline_cpu_01` 共10轮，累计训练与验证约44分钟。要从头开始一组新的实验，使用新的目录：
+CPU 正式基线仍使用 DeepLabV3，但选用计算量较小的 MobileNetV3-Large 骨干。预训练权重已缓存在 git 忽略的 `weights/torch/` 中。每轮遍历完整的1464张训练图，并对1449张验证图计算 mIoU。已完成的 `baseline_cpu_01` 共20轮，累计训练与验证约91分钟。第19轮最佳验证 mIoU 为45.04%，应使用 `best.pth`，不能直接使用第20轮 `last.pth` 作为最佳模型。
+
+以下命令用于在新目录从头运行另一组实验，不会覆盖已有的 `baseline_cpu_01`：
 
 ```powershell
 conda activate voc-seg-cpu
 python train_baseline.py --device cpu --backbone mobilenet_v3_large --freeze-backbone --image-size 256 --batch-size 2 --lr 0.001 --epochs 10 --log-every 20 --output-dir experiments/baseline_cpu_02
 ```
 
-如果想把已完成的 `baseline_cpu_01` 从10轮继续到总共20轮，保持其余参数一致，指定同一实验目录和 `last.pth`：
+如果想把已完成的 `baseline_cpu_01` 从20轮继续训练，建议先完成改进实验；若确实需要继续，保持其余参数一致并将 `--epochs` 改为目标总轮数：
 
 ```powershell
-python train_baseline.py --device cpu --backbone mobilenet_v3_large --freeze-backbone --image-size 256 --batch-size 2 --lr 0.001 --epochs 20 --log-every 20 --output-dir experiments/baseline_cpu_01 --resume experiments/baseline_cpu_01/last.pth
+python train_baseline.py --device cpu --backbone mobilenet_v3_large --freeze-backbone --image-size 256 --batch-size 2 --lr 0.001 --epochs 30 --log-every 20 --output-dir experiments/baseline_cpu_01 --resume experiments/baseline_cpu_01/last.pth
 ```
 
-这里的 `--epochs 20` 表示训练完成时总共20轮，不是额外再训练20轮。CPU 训练完全可行，但完成多轮仍需较长时间。调试整条训练和验证链路可运行：
+这里的 `--epochs 30` 表示训练完成时总共30轮，不是额外再训练30轮。CPU 训练完全可行，但当前曲线已经出现验证波动，优先做独立改进实验。调试整条训练和验证链路可运行：
 
 ```powershell
 python train_baseline.py --device cpu --random-init --image-size 128 --batch-size 2 --epochs 1 --max-train-batches 1 --max-val-batches 1 --no-checkpoints --output-dir experiments/debug_01
@@ -294,3 +298,42 @@ python train_baseline.py --device cpu --random-init --image-size 128 --batch-siz
 ```powershell
 tensorboard --logdir experiments/baseline_cpu_01/tensorboard
 ```
+
+## 12. 当前基线分析
+
+前10轮最佳是第8轮的44.36%；20轮最佳是第19轮的45.04%，提高约0.68个百分点。训练损失从第1轮的1.0813持续降到第20轮的0.3280，但验证损失最低值出现在第12轮（0.4618），后期 mIoU 在约42%～45%之间波动。继续以相同学习率、冻结骨干训练更多轮，收益尚无保证。
+
+第19轮逐类 IoU 中，椅子13.05%、自行车21.53%、沙发25.63%、盆栽27.46%较弱。先查看这些类别的验证图片和预测边界，确认错误类型；之后优先做一组降低或衰减学习率的独立对照实验。若仍受限，再考虑解冻骨干后段并使用较小学习率，或提高输入分辨率。每次只改变一个主要因素，使用同一验证集评价。详细分析见 `report_sections/06_基线实验结果.md`。
+
+## 13. 学习率衰减实验
+
+`baseline_cpu_01` 保持不变，作为固定基线。训练脚本现在支持余弦退火学习率；使用 `--lr-scheduler cosine` 后，学习率从初始值 `--lr` 逐轮下降到 `--min-lr`。本实验只改变学习率策略，模型、数据划分、输入尺寸、batch size 和随机种子保持与基线一致。
+
+在 CPU 环境中创建独立实验：
+
+```powershell
+conda activate voc-seg-cpu
+python train_baseline.py `
+  --device cpu `
+  --backbone mobilenet_v3_large `
+  --freeze-backbone `
+  --image-size 256 `
+  --batch-size 2 `
+  --lr 0.001 `
+  --lr-scheduler cosine `
+  --min-lr 0.00001 `
+  --epochs 20 `
+  --log-every 20 `
+  --output-dir experiments/lr_schedule_01
+```
+
+训练结束后比较：
+
+```text
+baseline_cpu_01/metrics.csv
+lr_schedule_01/metrics.csv
+```
+
+主要指标是两组实验的最佳完整验证集 mIoU，而不是最后一轮 mIoU。`metrics.csv` 的 `learning_rate` 列和 TensorBoard 中的 `train/learning_rate` 用于确认学习率确实发生衰减。实际结果为：基线最佳45.04%，学习率衰减最佳47.93%，提高2.89个百分点。学习率衰减实验的结果文件位于 `experiments/lr_schedule_01/`。
+
+学习率衰减改善了飞机、公交车、火车和摩托车等类别，但椅子、自行车、盆栽和沙发仍然偏低。下一步应优先考虑解冻骨干后段、提高输入尺寸或更换更强的分割结构；继续使用相同模型训练更多轮的收益可能有限。
