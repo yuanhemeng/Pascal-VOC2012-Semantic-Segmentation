@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -37,6 +38,21 @@ def positive_int(value: str) -> int:
     return number
 
 
+def nonnegative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return number
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, default=PROJECT / "VOCdevkit" / "VOC2012")
@@ -60,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--random-init", action="store_true", help="Skip ImageNet backbone download; for debugging only")
     parser.add_argument("--freeze-backbone", action="store_true", help="Train only the segmentation head")
+    parser.add_argument("--unfreeze-last-blocks", type=nonnegative_int, default=0,
+                        help="With --freeze-backbone, train the last N backbone blocks")
+    parser.add_argument("--backbone-lr", type=float, default=1e-5,
+                        help="Learning rate for unfrozen backbone blocks")
+    parser.add_argument("--init-from", type=Path,
+                        help="Start a new experiment from another run's model checkpoint")
     parser.add_argument("--resume", type=Path, help="Resume from this run's last.pth")
     parser.add_argument("--max-train-batches", type=positive_int, help="Debug only: limit train batches")
     parser.add_argument("--max-val-batches", type=positive_int, help="Debug only: limit validation images")
@@ -74,6 +96,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("weight-decay must be nonnegative and finite")
     if not math.isfinite(args.min_lr) or args.min_lr < 0 or args.min_lr > args.lr:
         parser.error("min-lr must be finite, nonnegative, and no greater than lr")
+    if not math.isfinite(args.backbone_lr) or args.backbone_lr <= 0:
+        parser.error("backbone-lr must be positive and finite")
+    if args.unfreeze_last_blocks and not args.freeze_backbone:
+        parser.error("--unfreeze-last-blocks requires --freeze-backbone")
+    if args.init_from and args.random_init:
+        parser.error("--init-from and --random-init cannot be combined")
     if (args.max_train_batches or args.max_val_batches) and not args.no_checkpoints:
         parser.error("Debug batch limits require --no-checkpoints to avoid saving partial-run weights")
     if args.resume and args.no_checkpoints:
@@ -93,10 +121,29 @@ def single_sample(batch):
     return batch[0]
 
 
-def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone):
+def configure_backbone_training(model, freeze_backbone: bool, unfreeze_last_blocks: int) -> list[str]:
+    """Freeze the backbone, then optionally re-enable its last N child blocks."""
+    if not freeze_backbone and unfreeze_last_blocks:
+        raise ValueError("Partial unfreezing requires --freeze-backbone")
+    blocks = list(model.backbone.named_children())
+    if unfreeze_last_blocks > len(blocks):
+        raise ValueError(f"Backbone has only {len(blocks)} blocks")
+    if freeze_backbone:
+        model.backbone.requires_grad_(False)
+        selected = blocks[-unfreeze_last_blocks:] if unfreeze_last_blocks else []
+        for _, block in selected:
+            block.requires_grad_(True)
+        return [name for name, _ in selected]
+    return [name for name, block in blocks if any(p.requires_grad for p in block.parameters())]
+
+
+def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone, unfreeze_last_blocks):
     model.train()
     if freeze_backbone:
         model.backbone.eval()
+        if unfreeze_last_blocks:
+            for block in list(model.backbone.children())[-unfreeze_last_blocks:]:
+                block.train()
     loss_total = 0.0
     valid_total = 0
     images_seen = 0
@@ -211,8 +258,18 @@ def main() -> None:
         "cpu_threads": args.cpu_threads if device.type == "cpu" else None,
         "python": platform.python_version(), "torch": str(torch.__version__), "torchvision": str(torchvision.__version__),
     }
+    if args.unfreeze_last_blocks:
+        config["unfreeze_last_blocks"] = args.unfreeze_last_blocks
+        config["backbone_lr"] = args.backbone_lr
+    if args.init_from:
+        if not args.init_from.is_file():
+            raise FileNotFoundError(f"Initial checkpoint not found: {args.init_from}")
+        config["init_from"] = str(args.init_from.resolve())
+        config["init_from_sha256"] = sha256_file(args.init_from)
     if args.resume is None and args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
+    if args.init_from and args.init_from.resolve().parent == args.output_dir.resolve():
+        raise ValueError("--init-from must point to a different experiment directory")
     if args.resume and args.resume.resolve().parent != args.output_dir.resolve():
         raise ValueError("Resume checkpoint must be inside --output-dir")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,16 +278,36 @@ def main() -> None:
         (args.output_dir / "command.txt").write_text(subprocess.list2cmdline(sys.argv) + "\n", encoding="utf-8")
 
     model = build_deeplabv3(
-        pretrained_backbone=not args.random_init and args.resume is None,
+        pretrained_backbone=not args.random_init and args.resume is None and args.init_from is None,
         backbone=args.backbone,
     ).to(device)
-    if args.freeze_backbone:
-        model.backbone.requires_grad_(False)
-    optimizer = torch.optim.AdamW(
-        (parameter for parameter in model.parameters() if parameter.requires_grad),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+    if args.init_from and args.resume is None:
+        with torch.serialization.safe_globals([torch.torch_version.TorchVersion]):
+            source_checkpoint = torch.load(args.init_from, map_location=device, weights_only=True)
+        if source_checkpoint["config"].get("backbone") != args.backbone:
+            raise ValueError("Initial checkpoint backbone differs from --backbone")
+        model.load_state_dict(source_checkpoint["model"])
+        print(f"Initialized from {args.init_from} (epoch {source_checkpoint['epoch']})", flush=True)
+    trainable_backbone_blocks = configure_backbone_training(
+        model, args.freeze_backbone, args.unfreeze_last_blocks
     )
+    if args.unfreeze_last_blocks:
+        head_parameters = [p for name, p in model.named_parameters() if not name.startswith("backbone.") and p.requires_grad]
+        backbone_parameters = [p for p in model.backbone.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": head_parameters, "lr": args.lr},
+                {"params": backbone_parameters, "lr": args.backbone_lr},
+            ],
+            weight_decay=args.weight_decay,
+        )
+        print(f"Trainable backbone blocks: {trainable_backbone_blocks}", flush=True)
+    else:
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
     scheduler = None
     if args.lr_scheduler == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -272,7 +349,7 @@ def main() -> None:
                 started = time.perf_counter()
                 train_loss, train_seen = train_epoch(
                     model, train_loader, optimizer, device, args.max_train_batches,
-                    args.log_every, args.freeze_backbone,
+                    args.log_every, args.freeze_backbone, args.unfreeze_last_blocks,
                 )
                 val_loss, metrics, val_seen = validate(model, val_loader, device, args.max_val_batches, writer, epoch)
                 miou, accuracy = metrics.mean_iou(), metrics.pixel_accuracy()
@@ -291,6 +368,8 @@ def main() -> None:
                 writer.add_scalar("val/mIoU", miou, epoch)
                 writer.add_scalar("val/pixel_accuracy", accuracy, epoch)
                 writer.add_scalar("train/learning_rate", record["learning_rate"], epoch)
+                if args.unfreeze_last_blocks:
+                    writer.add_scalar("train/backbone_learning_rate", optimizer.param_groups[1]["lr"], epoch)
                 writer.flush()
                 print(f"epoch {epoch}/{args.epochs}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, mIoU={miou:.4f}, accuracy={accuracy:.4f}, val_images={val_seen}, partial={partial}", flush=True)
                 if scheduler is not None:

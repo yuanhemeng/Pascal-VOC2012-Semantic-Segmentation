@@ -337,3 +337,40 @@ lr_schedule_01/metrics.csv
 主要指标是两组实验的最佳完整验证集 mIoU，而不是最后一轮 mIoU。`metrics.csv` 的 `learning_rate` 列和 TensorBoard 中的 `train/learning_rate` 用于确认学习率确实发生衰减。实际结果为：基线最佳45.04%，学习率衰减最佳47.93%，提高2.89个百分点。学习率衰减实验的结果文件位于 `experiments/lr_schedule_01/`。
 
 学习率衰减改善了飞机、公交车、火车和摩托车等类别，但椅子、自行车、盆栽和沙发仍然偏低。下一步应优先考虑解冻骨干后段、提高输入尺寸或更换更强的分割结构；继续使用相同模型训练更多轮的收益可能有限。
+
+## 14. 解冻骨干后段实验
+
+`lr_schedule_01/best.pth` 已经完成20轮训练，最佳验证 mIoU 为47.93%。下一组实验从该权重开始，让 MobileNetV3 骨干最后3个模块（14、15、16）参与训练，前面14个模块仍冻结；分割头与骨干后段分别使用较小的学习率。这是一个新的微调阶段，不会修改原实验目录。
+
+在项目目录的 VSCode PowerShell 终端运行：
+
+```powershell
+conda activate voc-seg-cpu
+python train_baseline.py `
+  --device cpu `
+  --backbone mobilenet_v3_large `
+  --freeze-backbone `
+  --unfreeze-last-blocks 3 `
+  --init-from experiments/lr_schedule_01/best.pth `
+  --image-size 256 `
+  --batch-size 2 `
+  --lr 0.0001 `
+  --backbone-lr 0.00001 `
+  --lr-scheduler cosine `
+  --min-lr 0.000001 `
+  --epochs 10 `
+  --log-every 20 `
+  --output-dir experiments/finetune_tail_01
+```
+
+训练时终端每20个 batch 打印进度，每轮对全部验证图片计算 mIoU。新目录将保留配置、命令、CSV、TensorBoard 日志、最佳权重及末轮权重。`config.json` 记录来源 checkpoint 和文件哈希。CPU 上微调骨干会比冻结骨干慢；先观察第一轮耗时和 mIoU，再决定是否跑满10轮。
+
+如果训练中断，保持上述所有参数不变，在命令末尾增加：
+
+```powershell
+--resume experiments/finetune_tail_01/last.pth
+```
+
+续训会从已完成的最后一个 epoch 开始；`--epochs 10` 指本次新实验的总轮数。
+
+这组实验同时改变了可训练层范围和两组学习率，属于“从现有最佳模型继续微调”的方案实验。若要严格证明提升来自解冻骨干，应从同一个 `lr_schedule_01/best.pth` 再运行一组“骨干仍冻结、其余设置及轮数相同”的对照实验。
