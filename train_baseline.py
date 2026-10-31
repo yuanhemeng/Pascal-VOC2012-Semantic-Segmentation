@@ -171,10 +171,9 @@ def configure_backbone_training(model, freeze_backbone: bool, unfreeze_last_bloc
 def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone, unfreeze_last_blocks, loss_name, dice_weight):
     model.train()
     if freeze_backbone:
+        # Keep backbone BatchNorm running statistics fixed. The last blocks
+        # still receive gradients because their parameters remain trainable.
         model.backbone.eval()
-        if unfreeze_last_blocks:
-            for block in list(model.backbone.children())[-unfreeze_last_blocks:]:
-                block.train()
     loss_total = 0.0
     valid_total = 0
     images_seen = 0
