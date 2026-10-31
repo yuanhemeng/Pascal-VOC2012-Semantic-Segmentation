@@ -62,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=positive_int, default=2)
     parser.add_argument("--image-size", type=positive_int, default=IMAGE_SIZE)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--loss", choices=("ce", "ce_dice"), default="ce")
+    parser.add_argument("--dice-weight", type=float, default=1.0)
     parser.add_argument(
         "--lr-scheduler",
         choices=("none", "cosine"),
@@ -98,6 +100,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("min-lr must be finite, nonnegative, and no greater than lr")
     if not math.isfinite(args.backbone_lr) or args.backbone_lr <= 0:
         parser.error("backbone-lr must be positive and finite")
+    if not math.isfinite(args.dice_weight) or args.dice_weight < 0:
+        parser.error("dice-weight must be nonnegative and finite")
+    if args.loss == "ce_dice" and args.dice_weight == 0:
+        parser.error("dice-weight must be positive when --loss ce_dice is used")
     if args.unfreeze_last_blocks and not args.freeze_backbone:
         parser.error("--unfreeze-last-blocks requires --freeze-backbone")
     if args.init_from and args.random_init:
@@ -121,6 +127,31 @@ def single_sample(batch):
     return batch[0]
 
 
+def multiclass_dice_loss(logits, target, ignore_index=IGNORE_INDEX, smooth=1.0):
+    """Dice loss over classes present in valid target pixels."""
+    valid = target != ignore_index
+    safe_target = target.masked_fill(~valid, 0)
+    probabilities = logits.softmax(dim=1)
+    one_hot = F.one_hot(safe_target, num_classes=NUM_CLASSES).permute(0, 3, 1, 2).to(probabilities.dtype)
+    valid = valid.unsqueeze(1)
+    probabilities = probabilities * valid
+    one_hot = one_hot * valid
+    intersection = (probabilities * one_hot).sum(dim=(0, 2, 3))
+    denominator = probabilities.sum(dim=(0, 2, 3)) + one_hot.sum(dim=(0, 2, 3))
+    present = one_hot.sum(dim=(0, 2, 3)) > 0
+    if not present.any():
+        return logits.new_zeros(())
+    dice = (2 * intersection + smooth) / (denominator + smooth)
+    return 1 - dice[present].mean()
+
+
+def segmentation_loss(logits, target, loss_name, dice_weight):
+    cross_entropy = F.cross_entropy(logits, target, ignore_index=IGNORE_INDEX)
+    if loss_name == "ce":
+        return cross_entropy
+    return cross_entropy + dice_weight * multiclass_dice_loss(logits, target)
+
+
 def configure_backbone_training(model, freeze_backbone: bool, unfreeze_last_blocks: int) -> list[str]:
     """Freeze the backbone, then optionally re-enable its last N child blocks."""
     if not freeze_backbone and unfreeze_last_blocks:
@@ -137,7 +168,7 @@ def configure_backbone_training(model, freeze_backbone: bool, unfreeze_last_bloc
     return [name for name, block in blocks if any(p.requires_grad for p in block.parameters())]
 
 
-def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone, unfreeze_last_blocks):
+def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone, unfreeze_last_blocks, loss_name, dice_weight):
     model.train()
     if freeze_backbone:
         model.backbone.eval()
@@ -158,7 +189,7 @@ def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze
         logits = model(images)["out"]
         if logits.shape[:2] != (images.shape[0], NUM_CLASSES) or logits.shape[-2:] != masks.shape[-2:]:
             raise RuntimeError(f"Unexpected output shape: {tuple(logits.shape)}")
-        loss = F.cross_entropy(logits, masks, ignore_index=IGNORE_INDEX)
+        loss = segmentation_loss(logits, masks, loss_name, dice_weight)
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite training loss in batch {batch_index}")
         optimizer.zero_grad(set_to_none=True)
@@ -175,7 +206,7 @@ def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze
 
 
 @torch.inference_mode()
-def validate(model, loader, device, max_batches, writer, epoch):
+def validate(model, loader, device, max_batches, writer, epoch, loss_name, dice_weight):
     model.eval()
     metrics = SegmentationMetrics(NUM_CLASSES)
     loss_total = 0.0
@@ -189,7 +220,7 @@ def validate(model, loader, device, max_batches, writer, epoch):
         target = mask.unsqueeze(0).to(device)
         if logits.shape[-2:] != target.shape[-2:]:
             raise RuntimeError("Validation logits and original mask have different sizes")
-        loss = F.cross_entropy(logits, target, ignore_index=IGNORE_INDEX)
+        loss = segmentation_loss(logits, target, loss_name, dice_weight)
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite validation loss in image {batch_index}")
         prediction = logits.argmax(dim=1).squeeze(0).cpu()
@@ -251,6 +282,7 @@ def main() -> None:
         "freeze_backbone": args.freeze_backbone,
         "image_size": args.image_size, "batch_size": args.batch_size,
         "lr": args.lr, "lr_scheduler": args.lr_scheduler, "min_lr": args.min_lr,
+        "loss": args.loss, "dice_weight": args.dice_weight,
         "weight_decay": args.weight_decay, "seed": args.seed,
         "train_images": len(train_data), "val_images": len(val_data),
         "max_train_batches": args.max_train_batches, "max_val_batches": args.max_val_batches,
@@ -350,8 +382,12 @@ def main() -> None:
                 train_loss, train_seen = train_epoch(
                     model, train_loader, optimizer, device, args.max_train_batches,
                     args.log_every, args.freeze_backbone, args.unfreeze_last_blocks,
+                    args.loss, args.dice_weight,
                 )
-                val_loss, metrics, val_seen = validate(model, val_loader, device, args.max_val_batches, writer, epoch)
+                val_loss, metrics, val_seen = validate(
+                    model, val_loader, device, args.max_val_batches, writer, epoch,
+                    args.loss, args.dice_weight,
+                )
                 miou, accuracy = metrics.mean_iou(), metrics.pixel_accuracy()
                 if not math.isfinite(miou) or not math.isfinite(accuracy):
                     raise RuntimeError("Validation metrics are not finite")
