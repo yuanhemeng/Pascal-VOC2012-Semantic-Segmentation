@@ -87,9 +87,36 @@
 
 相对冻结骨干的公平基线，21类中19类提升，只有狗下降0.02、沙发下降0.62个百分点。自行车提高12.52个百分点，是本实验最重要的逐类证据，符合浅层高分辨率特征有助于车轮和细杆结构恢复的预期。飞机、餐桌、鸟、马和摩托车也有较明显提升。
 
-但是，椅子和盆栽只小幅提高，沙发反而下降；与此前微调最佳相比，椅子、沙发、盆栽仍未改善。这说明浅层融合解决了部分空间细节问题，但不能单独解决椅子/沙发语义混淆和盆栽整体漏检。当前结论来自逐类像素IoU，正式判断图片级完全漏检变化还需要对新checkpoint运行完整错误分析。
+但是，椅子和盆栽只小幅提高，沙发反而下降；与此前微调最佳相比，椅子、沙发、盆栽仍未改善。这说明浅层融合解决了部分空间细节问题，但不能单独解决椅子/沙发语义混淆。下一节使用完整逐图错误分析进一步区分IoU、precision、recall和完全漏检比例的变化。
 
-## 11.6 结论与下一步实验
+## 11.6 完整验证集错误分析
+
+使用第20轮 `best.pth` 对全部1449张验证图重新推理，得到mIoU 58.0238%、像素准确率88.6669%，与训练日志逐位一致；`partial_analysis=false`。下表与旧结构微调最佳 `finetune_gpu_02` 的完整错误分析采用相同统计口径。
+
+| 类别 | 旧IoU | 新IoU | 旧Precision→新Precision | 旧Recall→新Recall | 完全漏检比例 | 图片级Recall中位数 |
+|---|---:|---:|---:|---:|---:|---:|
+| 椅子 | 19.16% | 17.72% | 31.51%→30.48% | 32.84%→29.75% | 33.33%→34.15% | 14.69%→5.90% |
+| 自行车 | 30.17% | **42.00%** | 37.48%→48.42% | 60.71%→76.00% | 20.25%→15.19% | 54.05%→77.11% |
+| 沙发 | 34.06% | 32.16% | 51.54%→44.97% | 50.11%→53.02% | 12.22%→7.78% | 49.17%→54.94% |
+| 盆栽 | 35.29% | 34.96% | 56.46%→46.06% | 48.49%→59.20% | 45.88%→25.88% | 5.92%→22.74% |
+
+自行车的precision和recall同时提高，完全漏检比例下降5.06个百分点，图片级recall中位数提高23.06个百分点，说明浅层融合对自行车不是简单扩大预测区域，而是同时改善了检出和区域质量。
+
+盆栽完全漏检比例下降20个百分点，沙发下降4.44个百分点，两类的recall和图片级中位数均提高，说明模型更容易找到目标。但是它们的precision下降，导致IoU没有同步提高：模型找回了更多真实前景，也把更多邻近像素误判为该类。这是“召回提高、区域变松”的典型权衡。
+
+椅子是明确的未解决项：precision、recall、IoU和图片级recall中位数均下降，完全漏检比例略升。新解码器提供的局部细节不足以解决椅子与人物、沙发和背景之间的语义判别。
+
+![新解码器仍会完全漏检被人物遮挡的自行车](../error_analysis/deeplabv3plus_decoder_01_error/visualizations/bicycle/01_2008_006254.png)
+
+*图11-2　自行车总体显著改善，但复杂遮挡和多目标场景中仍可能完全漏检。*
+
+![新解码器仍会忽略座椅区域](../error_analysis/deeplabv3plus_decoder_01_error/visualizations/chair/01_2011_002343.png)
+
+*图11-3　人物主体能够识别，但承载人物的椅子区域没有正确预测，反映语义判别仍不足。*
+
+本节最差样本是按recall和IoU有意筛选的失败案例，不代表类别平均表现；比例结论来自完整 `sample_class_metrics.csv`，不能只用展示图片推断。
+
+## 11.7 结论与下一步实验
 
 阶段A达到预设进入条件：总体mIoU提高，19个类别相对公平基线提升，而且没有出现大范围类别退化。因此下一步按原计划进行阶段B：从本实验第20轮 `best.pth` 初始化，解冻MobileNetV3最后3块，以较小骨干学习率微调10轮。
 
@@ -97,17 +124,17 @@
 python train_baseline.py --device cuda --architecture deeplabv3plus --backbone mobilenet_v3_large --freeze-backbone --unfreeze-last-blocks 3 --init-from experiments/deeplabv3plus_decoder_01/best.pth --image-size 384 --batch-size 4 --lr 0.0001 --backbone-lr 0.00001 --lr-scheduler cosine --min-lr 0.000001 --loss ce_dice --dice-weight 1.0 --epochs 10 --log-every 20 --output-dir experiments/deeplabv3plus_finetune_01
 ```
 
-阶段B的主要对照应是本实验58.02%，而不是旧模型56.84%。若阶段B没有超过58.02%，最终测试推理仍使用本实验的 `best.pth`。不建议先继续冻结骨干增加轮数，因为后两轮增益很小、学习率已接近下限；也不建议同时加入类别权重，否则无法判断微调骨干的独立贡献。
+阶段B的主要对照应是本实验58.02%，而不是旧模型56.84%。若阶段B没有超过58.02%，最终测试推理仍使用本实验的 `best.pth`。除总mIoU外，阶段B还应检查椅子IoU和图片级recall是否恢复、盆栽和沙发precision是否回升，并确保自行车IoU不明显回退。不建议先继续冻结骨干增加轮数，因为后两轮增益很小、学习率已接近下限；也不建议同时加入类别权重，否则无法判断微调骨干的独立贡献。
 
-在启动或完成阶段B前，建议对本实验最佳权重运行一次完整错误分析，建立新的图片级漏检基线：
+本实验的完整错误分析已经完成，结果目录为 `error_analysis/deeplabv3plus_decoder_01_error`。阶段B完成后应使用相同参数再次运行错误分析，输出到新的 `error_analysis/deeplabv3plus_finetune_01` 目录：
 
 ```bash
-python analyze_validation_errors.py --device cuda --checkpoint experiments/deeplabv3plus_decoder_01/best.pth --target-classes chair,bicycle,sofa,pottedplant --samples-per-class 8 --output-dir error_analysis/deeplabv3plus_decoder_01
+python analyze_validation_errors.py --device cuda --checkpoint experiments/deeplabv3plus_finetune_01/best.pth --target-classes chair,bicycle,sofa,pottedplant --samples-per-class 8 --output-dir error_analysis/deeplabv3plus_finetune_01
 ```
 
-重点比较自行车完全漏检比例是否相对旧模型的20.25%下降，以及椅子33.33%、盆栽45.88%、沙发12.22%的完全漏检比例是否改善。该错误分析用于解释机制，不替代以完整验证集mIoU选择最终模型。
+阶段B重点与本节的新基线比较：椅子34.15%、自行车15.19%、沙发7.78%、盆栽25.88%的完全漏检比例，以及四类precision/recall变化。该错误分析用于解释机制，不替代以完整验证集mIoU选择最终模型。
 
-## 11.7 证据文件
+## 11.8 证据文件
 
 - `experiments/deeplabv3plus_decoder_01/config.json`：模型、环境和超参数。
 - `metrics.csv`：20轮完整训练与验证结果。
@@ -116,3 +143,4 @@ python analyze_validation_errors.py --device cuda --checkpoint experiments/deepl
 - `command.txt`、`command_history.txt`：实际运行命令。
 - `tensorboard/`：训练过程事件文件。
 - `report_sections/assets/deeplabv3plus_decoder_01_curves.png`：由原始 `metrics.csv` 生成的20轮曲线图。
+- `error_analysis/deeplabv3plus_decoder_01_error/`：完整验证集混淆矩阵、逐类指标、逐图指标和32张失败案例图。
