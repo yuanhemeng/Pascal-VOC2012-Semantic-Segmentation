@@ -136,6 +136,30 @@
 - 检查每张图片尺寸、通道数、数据类型和类别值范围；
 - 将预测文件压缩，并整理代码、权重说明和报告。
 
+### 阶段 G：验证集错误分析
+
+使用当前最佳 checkpoint 对完整验证集生成可复核的错误证据：
+
+```powershell
+python analyze_validation_errors.py `
+  --device cuda `
+  --checkpoint experiments/finetune_gpu_02/best.pth `
+  --target-classes chair,bicycle,sofa,pottedplant `
+  --samples-per-class 8 `
+  --output-dir error_analysis/finetune_gpu_02
+```
+
+脚本使用 checkpoint 中记录的骨干和输入尺寸，按正式验证流程裁掉补边并恢复到原始标签尺寸。输出包括：
+
+- `summary.json`：checkpoint、完整/局部分析标记、重新计算的 mIoU 和像素准确率；
+- `class_metrics.csv`：21类 IoU、precision、recall、F1 和主要混淆类别；
+- `confusion_counts.csv`、`confusion_row_percent.csv`：像素级混淆矩阵；
+- `sample_class_metrics.csv`：每张图片中各真实类别的召回率、IoU 和主要误分类；
+- `selected_samples.csv`：各目标弱类别的最差样本清单；
+- `visualizations/`：原图、真实标签、预测结果三栏对比图。
+
+正式报告只能使用未设置 `--max-images` 的完整验证结果。`--max-images` 仅用于冒烟检查，生成的 `summary.json` 会标记 `partial_analysis=true`。
+
 ## 6. 必须保留的实验痕迹
 
 每次实验使用独立目录，不覆盖旧结果。建议结构如下：
@@ -242,15 +266,18 @@ experiments/
 - 学习率衰减结果：`lr_schedule_01` 使用余弦退火，初始学习率0.001、最小学习率0.00001；第20轮最佳验证 mIoU 为47.93%，像素准确率84.42%，较固定学习率基线提高2.89个百分点
 - 高分辨率结果：`high_resolution_gpu_01` 使用384×384输入和RTX 4090 D，第19轮最佳验证 mIoU 为55.19%，像素准确率87.70%，较 `lr_schedule_01` 提高7.26个百分点
 - 高分辨率Dice结果：`highres_dice_01` 使用384×384输入、CE+Dice Loss和RTX 4090 D，第17轮最佳验证 mIoU 为55.68%，像素准确率87.77%，较 `high_resolution_gpu_01` 提高0.49个百分点
+- 骨干后段微调结果：`finetune_gpu_02` 从 `highres_dice_01/best.pth` 开始微调最后3个骨干模块，第8轮最佳验证mIoU为56.84%，像素准确率88.20%，较前一实验提高1.15个百分点
+- 验证集错误分析：已用 `finetune_gpu_02/best.pth` 完整分析1449张验证图；重新计算mIoU为56.8368%，与训练记录一致。椅子、自行车、沙发、盆栽IoU分别为19.16%、30.17%、34.06%、35.29%，详细分析见 `report_sections/10_验证集错误分析与下一步.md`
 
 ### 实验结果摘要
 
 | 实验编号 | 主要改动 | 最佳轮次 | 验证 mIoU | 像素准确率 | 是否作为最终方案 | 备注 |
 |---|---|---:|---:|---:|---|---|
-| baseline_cpu_01 | DeepLabV3-MobileNetV3，冻结预训练骨干，256像素，CPU | 19 | 45.04% | 82.41% | 当前基线 | 20轮完整训练；测试集尚未推理 |
-| lr_schedule_01 | 基线配置 + 余弦退火学习率 | 20 | 47.93% | 84.42% | 当前最佳 | 20轮完整训练；测试集尚未推理 |
-| high_resolution_gpu_01 | 余弦退火基线 + 384×384输入 + RTX 4090 D | 19 | 55.19% | 87.70% | 当前最佳 | 20轮完整训练；测试集尚未推理 |
-| highres_dice_01 | 384×384 + 余弦退火 + CE与Dice Loss | 17 | 55.68% | 87.77% | 当前最佳 | 20轮完整训练；测试集尚未推理 |
+| baseline_cpu_01 | DeepLabV3-MobileNetV3，冻结预训练骨干，256像素，CPU | 19 | 45.04% | 82.41% | 基线 | 20轮完整训练；测试集尚未推理 |
+| lr_schedule_01 | 基线配置 + 余弦退火学习率 | 20 | 47.93% | 84.42% | 否 | 20轮完整训练；测试集尚未推理 |
+| high_resolution_gpu_01 | 余弦退火基线 + 384×384输入 + RTX 4090 D | 19 | 55.19% | 87.70% | 否 | 20轮完整训练；测试集尚未推理 |
+| highres_dice_01 | 384×384 + 余弦退火 + CE与Dice Loss | 17 | 55.68% | 87.77% | 否 | 20轮完整训练；测试集尚未推理 |
+| finetune_gpu_02 | 从高分辨率Dice最佳权重微调骨干最后3个模块 | 微调8 | **56.84%** | **88.20%** | **当前最佳** | 10轮完整微调；已完成验证集错误分析 |
 
 ### 待解决问题
 
@@ -264,7 +291,9 @@ experiments/
 - [x] 完成学习率衰减对照实验
 - [x] 完成384×384高分辨率对照实验
 - [x] 完成384×384 + Dice Loss实验
-- [ ] 完成正确处理BatchNorm的骨干后段微调实验
+- [x] 完成正确处理BatchNorm的骨干后段微调实验
+- [x] 完成当前最佳权重的完整验证集错误分析
+- [ ] 完成浅层特征融合解码器对照实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字

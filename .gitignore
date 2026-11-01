@@ -29,6 +29,7 @@ checkpoints/
 # Training outputs and experiment artifacts
 outputs/
 experiments/
+error_analysis/
 logs/
 runs/
 tensorboard/
