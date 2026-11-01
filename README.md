@@ -160,6 +160,56 @@ python analyze_validation_errors.py `
 
 正式报告只能使用未设置 `--max-images` 的完整验证结果。`--max-images` 仅用于冒烟检查，生成的 `summary.json` 会标记 `partial_analysis=true`。
 
+### 阶段 H：DeepLabV3+式浅层特征融合实验
+
+代码通过 `--architecture deeplabv3plus` 启用新解码器。MobileNetV3第3块提供24通道、输出步长4的浅层特征，最终块提供960通道、输出步长16的深层特征；深层特征经过ASPP后上采样，与投影到48通道的浅层特征融合。旧checkpoint没有 `architecture` 字段时仍按 `deeplabv3` 加载。
+
+上传新代码到GPU后，先运行1个训练batch和1张验证图：
+
+```bash
+python train_baseline.py \
+  --device cuda \
+  --architecture deeplabv3plus \
+  --backbone mobilenet_v3_large \
+  --freeze-backbone \
+  --image-size 384 \
+  --batch-size 4 \
+  --lr 0.001 \
+  --lr-scheduler cosine \
+  --min-lr 0.00001 \
+  --loss ce_dice \
+  --dice-weight 1.0 \
+  --epochs 1 \
+  --max-train-batches 1 \
+  --max-val-batches 1 \
+  --no-checkpoints \
+  --output-dir experiments/deeplabv3plus_gpu_smoke
+```
+
+冒烟检查成功后运行阶段A的20轮正式实验：
+
+```bash
+python train_baseline.py \
+  --device cuda \
+  --architecture deeplabv3plus \
+  --backbone mobilenet_v3_large \
+  --freeze-backbone \
+  --image-size 384 \
+  --batch-size 4 \
+  --lr 0.001 \
+  --lr-scheduler cosine \
+  --min-lr 0.00001 \
+  --loss ce_dice \
+  --dice-weight 1.0 \
+  --epochs 20 \
+  --log-every 20 \
+  --output-dir experiments/deeplabv3plus_decoder_01
+```
+
+正式实验必须使用新目录，不能添加 `--max-train-batches` 或 `--max-val-batches`。阶段A主要对照是同样冻结骨干的 `highres_dice_01`（55.68%），不是已经额外微调10轮的 `finetune_gpu_02`。
+
+阶段A已经完成：第20轮最佳验证mIoU为58.02%，像素准确率88.67%。相对公平结构基线55.68%提高2.34个百分点，相对此前全局最佳56.84%提高1.19个百分点；21类中19类相对公平基线提升，自行车IoU提高12.52个百分点。详细结果见 `report_sections/11_DeepLabV3Plus浅层融合实验.md`。
+
 ## 6. 必须保留的实验痕迹
 
 每次实验使用独立目录，不覆盖旧结果。建议结构如下：
@@ -268,6 +318,7 @@ experiments/
 - 高分辨率Dice结果：`highres_dice_01` 使用384×384输入、CE+Dice Loss和RTX 4090 D，第17轮最佳验证 mIoU 为55.68%，像素准确率87.77%，较 `high_resolution_gpu_01` 提高0.49个百分点
 - 骨干后段微调结果：`finetune_gpu_02` 从 `highres_dice_01/best.pth` 开始微调最后3个骨干模块，第8轮最佳验证mIoU为56.84%，像素准确率88.20%，较前一实验提高1.15个百分点
 - 验证集错误分析：已用 `finetune_gpu_02/best.pth` 完整分析1449张验证图；重新计算mIoU为56.8368%，与训练记录一致。椅子、自行车、沙发、盆栽IoU分别为19.16%、30.17%、34.06%、35.29%，详细分析见 `report_sections/10_验证集错误分析与下一步.md`
+- 浅层融合解码器结果：`deeplabv3plus_decoder_01` 冻结MobileNetV3骨干训练20轮，第20轮最佳验证mIoU为58.02%、像素准确率88.67%，较相同设置的DeepLabV3提高2.34个百分点，刷新当前最佳
 
 ### 实验结果摘要
 
@@ -277,7 +328,8 @@ experiments/
 | lr_schedule_01 | 基线配置 + 余弦退火学习率 | 20 | 47.93% | 84.42% | 否 | 20轮完整训练；测试集尚未推理 |
 | high_resolution_gpu_01 | 余弦退火基线 + 384×384输入 + RTX 4090 D | 19 | 55.19% | 87.70% | 否 | 20轮完整训练；测试集尚未推理 |
 | highres_dice_01 | 384×384 + 余弦退火 + CE与Dice Loss | 17 | 55.68% | 87.77% | 否 | 20轮完整训练；测试集尚未推理 |
-| finetune_gpu_02 | 从高分辨率Dice最佳权重微调骨干最后3个模块 | 微调8 | **56.84%** | **88.20%** | **当前最佳** | 10轮完整微调；已完成验证集错误分析 |
+| finetune_gpu_02 | 从高分辨率Dice最佳权重微调骨干最后3个模块 | 微调8 | 56.84% | 88.20% | 否 | 10轮完整微调；已完成验证集错误分析 |
+| deeplabv3plus_decoder_01 | 384×384 + CE与Dice + 浅层特征融合解码器，骨干冻结 | 20 | **58.02%** | **88.67%** | **当前最佳** | 20轮完整训练；下一步微调骨干最后3块 |
 
 ### 待解决问题
 
@@ -293,7 +345,9 @@ experiments/
 - [x] 完成384×384 + Dice Loss实验
 - [x] 完成正确处理BatchNorm的骨干后段微调实验
 - [x] 完成当前最佳权重的完整验证集错误分析
-- [ ] 完成浅层特征融合解码器对照实验
+- [x] 实现并测试DeepLabV3+式浅层特征融合解码器
+- [x] 完成浅层特征融合解码器对照实验
+- [ ] 完成DeepLabV3+骨干后段微调实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字

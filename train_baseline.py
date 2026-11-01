@@ -21,7 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.data_preprocessing import IGNORE_INDEX, IMAGE_SIZE, NUM_CLASSES, VOCPairedDataset
 from src.metrics import SegmentationMetrics, restore_logits
-from src.model import build_deeplabv3
+from src.model import ARCHITECTURES, build_segmentation_model
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -58,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, default=PROJECT / "VOCdevkit" / "VOC2012")
     parser.add_argument("--output-dir", type=Path, default=PROJECT / "experiments" / "baseline_01")
     parser.add_argument("--epochs", type=positive_int, default=10)
+    parser.add_argument("--architecture", choices=ARCHITECTURES, default="deeplabv3")
     parser.add_argument("--backbone", choices=("mobilenet_v3_large", "resnet50"), default="mobilenet_v3_large")
     parser.add_argument("--batch-size", type=positive_int, default=2)
     parser.add_argument("--image-size", type=positive_int, default=IMAGE_SIZE)
@@ -106,6 +107,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("dice-weight must be positive when --loss ce_dice is used")
     if args.unfreeze_last_blocks and not args.freeze_backbone:
         parser.error("--unfreeze-last-blocks requires --freeze-backbone")
+    if args.architecture == "deeplabv3plus" and args.backbone != "mobilenet_v3_large":
+        parser.error("--architecture deeplabv3plus currently requires --backbone mobilenet_v3_large")
     if args.init_from and args.random_init:
         parser.error("--init-from and --random-init cannot be combined")
     if (args.max_train_batches or args.max_val_batches) and not args.no_checkpoints:
@@ -275,8 +278,10 @@ def main() -> None:
     val_loader = DataLoader(val_data, batch_size=1, shuffle=False, collate_fn=single_sample, num_workers=0)
     if len(train_loader) == 0:
         raise ValueError("Batch size exceeds the train split size")
+    model_name = "DeepLabV3" if args.architecture == "deeplabv3" else "DeepLabV3Plus"
     config = {
-        "model": f"DeepLabV3-{args.backbone}", "backbone": args.backbone,
+        "model": f"{model_name}-{args.backbone}",
+        "architecture": args.architecture, "backbone": args.backbone,
         "pretrained_backbone": not args.random_init,
         "freeze_backbone": args.freeze_backbone,
         "image_size": args.image_size, "batch_size": args.batch_size,
@@ -308,7 +313,8 @@ def main() -> None:
         (args.output_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
         (args.output_dir / "command.txt").write_text(subprocess.list2cmdline(sys.argv) + "\n", encoding="utf-8")
 
-    model = build_deeplabv3(
+    model = build_segmentation_model(
+        architecture=args.architecture,
         pretrained_backbone=not args.random_init and args.resume is None and args.init_from is None,
         backbone=args.backbone,
     ).to(device)
@@ -317,6 +323,9 @@ def main() -> None:
             source_checkpoint = torch.load(args.init_from, map_location=device, weights_only=True)
         if source_checkpoint["config"].get("backbone") != args.backbone:
             raise ValueError("Initial checkpoint backbone differs from --backbone")
+        source_architecture = source_checkpoint["config"].get("architecture", "deeplabv3")
+        if source_architecture != args.architecture:
+            raise ValueError("Initial checkpoint architecture differs from --architecture")
         model.load_state_dict(source_checkpoint["model"])
         print(f"Initialized from {args.init_from} (epoch {source_checkpoint['epoch']})", flush=True)
     trainable_backbone_blocks = configure_backbone_training(
@@ -349,7 +358,9 @@ def main() -> None:
         # The first checkpoint may contain TorchVersion rather than a plain str.
         with torch.serialization.safe_globals([torch.torch_version.TorchVersion]):
             checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
-        if checkpoint["config"] != config:
+        checkpoint_config = dict(checkpoint["config"])
+        checkpoint_config.setdefault("architecture", "deeplabv3")
+        if checkpoint_config != config:
             raise ValueError("Checkpoint configuration does not match this run")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])

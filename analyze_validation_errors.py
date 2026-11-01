@@ -25,7 +25,7 @@ from src.error_analysis import (
     select_worst_samples,
 )
 from src.metrics import SegmentationMetrics, restore_logits
-from src.model import build_deeplabv3
+from src.model import build_segmentation_model
 
 
 VOC_COLORS = np.array([
@@ -172,13 +172,16 @@ def main() -> None:
     checkpoint = load_checkpoint(args.checkpoint, device)
     config = checkpoint["config"]
     backbone = config.get("backbone")
+    architecture = config.get("architecture", "deeplabv3")
     image_size = int(config.get("image_size", 384))
     if backbone not in ("mobilenet_v3_large", "resnet50"):
         raise ValueError(f"Unsupported checkpoint backbone: {backbone}")
 
     dataset = VOCPairedDataset(args.data_root, "val", image_size=image_size)
     limit = min(len(dataset), args.max_images) if args.max_images else len(dataset)
-    model = build_deeplabv3(pretrained_backbone=False, backbone=backbone).to(device)
+    model = build_segmentation_model(
+        architecture=architecture, pretrained_backbone=False, backbone=backbone,
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
@@ -229,6 +232,7 @@ def main() -> None:
         "analyzed_images": limit,
         "partial_analysis": limit != len(dataset),
         "image_size": image_size,
+        "architecture": architecture,
         "device": str(device),
         "target_classes": [VOC_CLASS_NAMES[index] for index in target_class_ids],
         "samples_per_class": args.samples_per_class,
