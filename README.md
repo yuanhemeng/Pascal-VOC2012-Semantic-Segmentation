@@ -212,6 +212,36 @@ python train_baseline.py \
 
 阶段A完整错误分析也已完成：自行车完全漏检比例从20.25%降到15.19%，盆栽从45.88%降到25.88%，沙发从12.22%降到7.78%；但椅子升到34.15%。盆栽和沙发的recall提高而precision下降，说明检出增多但预测区域偏松。下一步通过骨干后段微调改善语义判别和区域精度，不同时叠加类别权重。
 
+阶段B使用专用启动器 `run_deeplabv3plus_finetune.py`。它会在启动前验证来源checkpoint的架构、骨干、输入尺寸和损失函数，固定最后3个骨干块及分组学习率，并拒绝覆盖非空输出目录。GPU上先运行：
+
+```bash
+python run_deeplabv3plus_finetune.py --device cuda --smoke
+```
+
+确认输出包含 `Source verified`、`Trainable backbone blocks: ['14', '15', '16']`，并完成1个训练batch和1张验证图后，启动正式10轮：
+
+```bash
+python run_deeplabv3plus_finetune.py --device cuda
+```
+
+默认来源为 `experiments/deeplabv3plus_decoder_01/best.pth`，正式输出为 `experiments/deeplabv3plus_finetune_01`。若冒烟目录已经存在且非空，使用 `--output-dir experiments/deeplabv3plus_finetune_smoke_02`，不要覆盖旧结果。
+
+阶段B已经完成10轮：第10轮最佳验证mIoU为58.99%、像素准确率89.27%，较阶段A的58.02%提高0.96个百分点。21类中18类提升；自行车、盆栽、沙发、椅子分别提高2.86、2.74、2.04、0.92个百分点。由于最佳mIoU和最低验证loss均出现在末轮，但原10轮余弦调度器已经结束，不直接使用 `--resume --epochs 20`。下一步只做5轮独立低学习率收尾。
+
+先运行收尾实验冒烟检查：
+
+```bash
+python run_deeplabv3plus_polish.py --device cuda --smoke
+```
+
+成功后运行5轮正式收尾：
+
+```bash
+python run_deeplabv3plus_polish.py --device cuda
+```
+
+收尾实验从 `deeplabv3plus_finetune_01/best.pth` 初始化，但重建优化器和5轮余弦计划；解码器学习率为`1e-5`、骨干学习率为`1e-6`、最低学习率为`1e-7`。正式结果保存到 `experiments/deeplabv3plus_polish_01`。
+
 ## 6. 必须保留的实验痕迹
 
 每次实验使用独立目录，不覆盖旧结果。建议结构如下：
@@ -351,7 +381,10 @@ experiments/
 - [x] 实现并测试DeepLabV3+式浅层特征融合解码器
 - [x] 完成浅层特征融合解码器对照实验
 - [x] 完成浅层融合解码器最佳权重的完整错误分析
-- [ ] 完成DeepLabV3+骨干后段微调实验
+- [x] 实现并测试DeepLabV3+阶段B专用启动器
+- [x] 完成DeepLabV3+骨干后段微调实验
+- [x] 实现并测试5轮低学习率收尾启动器
+- [ ] 完成5轮低学习率收尾实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字

@@ -126,6 +126,20 @@ python train_baseline.py --device cuda --architecture deeplabv3plus --backbone m
 
 阶段B的主要对照应是本实验58.02%，而不是旧模型56.84%。若阶段B没有超过58.02%，最终测试推理仍使用本实验的 `best.pth`。除总mIoU外，阶段B还应检查椅子IoU和图片级recall是否恢复、盆栽和沙发precision是否回升，并确保自行车IoU不明显回退。不建议先继续冻结骨干增加轮数，因为后两轮增益很小、学习率已接近下限；也不建议同时加入类别权重，否则无法判断微调骨干的独立贡献。
 
+为减少手工输入参数造成的错误，项目新增 `run_deeplabv3plus_finetune.py`。启动器会验证来源checkpoint必须是384输入、CE+Dice的DeepLabV3+-MobileNetV3模型，并固定本节的实验参数。先在GPU执行冒烟检查：
+
+```bash
+python run_deeplabv3plus_finetune.py --device cuda --smoke
+```
+
+冒烟检查只处理1个训练batch和1张验证图，强制添加 `--no-checkpoints`，不能作为实验成绩。成功后运行正式实验：
+
+```bash
+python run_deeplabv3plus_finetune.py --device cuda
+```
+
+本地已使用真实第20轮checkpoint完成启动器检查，确认只解冻骨干块14、15、16，并跑通参数更新和验证；19项自动化测试通过。
+
 本实验的完整错误分析已经完成，结果目录为 `error_analysis/deeplabv3plus_decoder_01_error`。阶段B完成后应使用相同参数再次运行错误分析，输出到新的 `error_analysis/deeplabv3plus_finetune_01` 目录：
 
 ```bash
@@ -144,3 +158,27 @@ python analyze_validation_errors.py --device cuda --checkpoint experiments/deepl
 - `tensorboard/`：训练过程事件文件。
 - `report_sections/assets/deeplabv3plus_decoder_01_curves.png`：由原始 `metrics.csv` 生成的20轮曲线图。
 - `error_analysis/deeplabv3plus_decoder_01_error/`：完整验证集混淆矩阵、逐类指标、逐图指标和32张失败案例图。
+- `run_deeplabv3plus_finetune.py`：阶段B来源校验、冒烟检查和正式训练启动器。
+
+## 11.9 阶段B骨干后段微调结果与收尾计划
+
+阶段B已完成10轮完整训练。每轮均使用1464张训练图和1449张验证图，`partial_run=False`。第10轮取得最佳mIoU 58.99%、像素准确率89.27%，验证loss 0.6431；相对阶段A的58.02%提高约0.96个百分点。累计耗时约584.82秒。
+
+| 对比项 | 阶段A冻结骨干 | 阶段B微调后 | 变化（百分点） |
+|---|---:|---:|---:|
+| 总体mIoU | 58.02% | **58.99%** | **+0.96** |
+| 自行车IoU | 42.00% | 44.86% | +2.86 |
+| 椅子IoU | 17.72% | 18.65% | +0.92 |
+| 盆栽IoU | 34.96% | 37.70% | +2.74 |
+| 沙发IoU | 32.16% | 34.20% | +2.04 |
+
+21类中18类提升；船、瓶子和餐桌分别下降0.92、0.29和0.72个百分点。弱类别均有改善，说明小学习率微调最后3个骨干块有效。第8轮mIoU为58.94%，第9轮回落至58.60%，第10轮回升并刷新最佳；同时第10轮验证loss也是最低值。因此结果尚不能断定完全进入平台，但原10轮余弦调度器已运行结束，checkpoint中的学习率降至`1e-6`。直接使用 `--resume --epochs 20` 会恢复`T_max=10`的调度器并使余弦学习率重新上升，不是合理的10–20轮延长方案。
+
+下一步只进行5轮独立低学习率收尾，而不是再训练10–20轮。新阶段从第10轮最佳模型参数初始化，但重建优化器和5轮余弦调度：分割头`1e-5`、骨干`1e-6`、最低学习率`1e-7`。项目新增 `run_deeplabv3plus_polish.py` 固定并校验这些参数。
+
+```bash
+python run_deeplabv3plus_polish.py --device cuda --smoke
+python run_deeplabv3plus_polish.py --device cuda
+```
+
+正式输出目录为 `experiments/deeplabv3plus_polish_01`。若5轮最佳mIoU没有超过58.99%，最终模型仍使用 `deeplabv3plus_finetune_01/best.pth`；若提高，则使用收尾实验的 `best.pth`，随后对最终权重运行完整错误分析和400张测试集推理。本地已用真实58.99% checkpoint完成1个训练batch和1张验证图的冒烟检查，确认只解冻块14、15、16；22项自动化测试通过。
