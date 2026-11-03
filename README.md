@@ -357,6 +357,8 @@ experiments/
 - 低学习率收尾结果：`deeplabv3plus_polish_01` 第3轮最佳mIoU为58.92%，未超过58.99%；停止继续训练，保留 `deeplabv3plus_finetune_01/best.pth`
 - ResNet50骨干结果：`deeplabv3plus_resnet50_01` 冻结ImageNet预训练ResNet50训练20轮，第18轮最佳mIoU为68.48%、像素准确率92.07%，较MobileNet微调最佳提高9.49个百分点，刷新当前全局最佳；详细结果见`report_sections/12_低学习率收尾与ResNet50实验结果.md`
 - ResNet50 layer4微调结果：`deeplabv3plus_resnet50_finetune_01` 第8轮最佳mIoU为70.21%、像素准确率92.64%，较冻结ResNet50提高1.73个百分点，刷新当前全局最佳
+- 最终候选权重错误分析：完整覆盖1449张验证图；椅子IoU最低为24.78%，自行车recall高但precision偏低，详细结果见`report_sections/12_低学习率收尾与ResNet50实验结果.md`
+- TTA验证结果：第8轮70.21%权重使用0.75/1.0/1.25尺度和水平翻转后，完整验证集mIoU为72.14%、像素准确率93.33%，21类全部提升；TTA不产生新权重，推理成本约为单次前向的6倍
 
 ### 实验结果摘要
 
@@ -372,6 +374,7 @@ experiments/
 | deeplabv3plus_polish_01 | 从58.99%权重继续5轮低学习率收尾 | 收尾3 | 58.92% | 89.19% | 否 | 未刷新最佳，停止继续训练 |
 | deeplabv3plus_resnet50_01 | DeepLabV3+ + 冻结ResNet50骨干，384×384 | 18 | **68.48%** | **92.07%** | **当前全局最佳** | 20轮完整训练；应使用第18轮best.pth |
 | deeplabv3plus_resnet50_finetune_01 | 从68.48%权重微调ResNet50 layer4 | 微调8 | **70.21%** | **92.64%** | **当前全局最佳** | 10轮完整微调；第9、10轮轻微回落 |
+| resnet50_finetune_tta_01 | 70.21%权重 + 三尺度水平翻转TTA | — | **72.14%** | **93.33%** | **当前最高验证推理方案** | 无新权重；每图6次前向，21类全部提升 |
 
 ### 待解决问题
 
@@ -397,7 +400,9 @@ experiments/
 - [x] 实现并测试DeepLabV3+ ResNet50骨干
 - [x] 完成冻结ResNet50骨干的20轮对照实验
 - [x] 完成ResNet50 layer4微调实验
-- [ ] 完成70.21%最终候选权重的完整错误分析
+- [x] 完成70.21%最终候选权重的完整错误分析
+- [x] 实现并测试多尺度水平翻转TTA评测代码
+- [x] 完成完整验证集TTA实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字

@@ -161,3 +161,64 @@ python analyze_validation_errors.py --device cuda --checkpoint experiments/deepl
 
 - `experiments/deeplabv3plus_resnet50_finetune_01/`：10轮配置、日志、权重和逐类IoU。
 - `report_sections/assets/deeplabv3plus_resnet50_finetune_01_curves.png`：微调曲线。
+
+## 12.10 最终候选权重错误分析
+
+使用第8轮最佳权重对全部1449张验证图重新推理，得到mIoU 70.2065%、像素准确率92.6359%，与训练日志一致，`partial_analysis=false`。
+
+| 类别 | IoU | Precision | Recall | 完全漏检图片比例 | 图片级Recall中位数 |
+|---|---:|---:|---:|---:|---:|
+| 椅子 | 24.78% | 45.36% | 35.32% | 24.39% | 16.95% |
+| 沙发 | 41.44% | 60.38% | 56.92% | 7.78% | 60.29% |
+| 盆栽 | 50.05% | 66.70% | 66.71% | 15.29% | 51.21% |
+| 自行车 | 52.89% | 57.88% | 86.00% | 8.86% | 85.67% |
+
+椅子仍是最主要瓶颈：precision和recall同时偏低，123张含椅子验证图中30张完全漏检，错误主要流向背景，其次是沙发和人物。自行车recall已达到86%，但precision只有57.88%，说明模型通常能找到目标，却容易把人物、车辆或背景并入自行车区域；直接增加自行车类别权重可能进一步增加假阳性。盆栽和沙发仍存在整目标漏检，但整体precision/recall相对均衡。
+
+错误分析结果位于 `error_analysis/resnet50_finetune_error_analysis/`，包含完整混淆矩阵、逐类指标、逐图指标和32张失败案例图。当前模型在第8轮后已经回落，不再延长相同训练配置。
+
+## 12.11 多尺度水平翻转TTA实验
+
+本实验不修改模型参数，分别以0.75、1.0、1.25倍输入尺度推理，并对原图和水平翻转图的原始尺寸logits求平均。每张验证图共6次前向。完整评估覆盖全部1449张验证图片，`partial_analysis=false`。
+
+GPU冒烟检查：
+
+```bash
+python evaluate_tta.py --device cuda --checkpoint experiments/deeplabv3plus_resnet50_finetune_01/best.pth --scales 0.75,1.0,1.25 --max-images 2 --output-dir evaluations/resnet50_finetune_tta_smoke
+```
+
+实际完整验证集命令为：
+
+```bash
+python evaluate_tta.py --device cuda --checkpoint experiments/deeplabv3plus_resnet50_finetune_01/best.pth --scales 0.75,1.0,1.25 --output-dir evaluations/resnet50_finetune_tta_01
+```
+
+### 12.11.1 总体结果
+
+| 推理方式 | 验证mIoU | 像素准确率 | 每图前向次数 |
+|---|---:|---:|---:|
+| 单尺度384、无TTA | 70.2065% | 92.6359% | 1 |
+| 0.75/1.0/1.25尺度 + 水平翻转 | **72.1406%** | **93.3299%** | 6 |
+| TTA变化 | **+1.9340个百分点** | **+0.6940个百分点** | 推理成本约6倍 |
+
+TTA使21个类别IoU全部提高，没有类别退化，因此提升具有一致性，不是少数类别或背景单独拉动。TTA不产生新checkpoint：模型权重仍是第8轮 `best.pth`，72.14%应表述为“该权重使用多尺度水平翻转TTA后的验证结果”，不能写成训练模型单尺度成绩。
+
+### 12.11.2 逐类变化
+
+| 类别 | 单尺度IoU | TTA IoU | 变化（百分点） |
+|---|---:|---:|---:|
+| 椅子 | 24.78% | 26.83% | +2.05 |
+| 自行车 | 52.89% | 54.80% | +1.91 |
+| 沙发 | 41.44% | 44.20% | +2.75 |
+| 盆栽 | 50.05% | 51.63% | +1.58 |
+| 船 | 65.06% | 68.81% | +3.75 |
+| 瓶子 | 61.71% | 64.92% | +3.21 |
+| 电视显示器 | 62.96% | 65.78% | +2.82 |
+
+提升最大的类别是船（+3.75）、瓶子（+3.21）、电视显示器（+2.82）和沙发（+2.75）。“椅子”仍是最低类别，但也提高2.05个百分点；这说明多尺度融合能缓解尺度和边界误差，却没有根除椅子与背景、沙发和人物之间的语义混淆。
+
+### 12.11.3 结论与使用边界
+
+完整TTA结果有效，应作为当前最高验证推理方案。课程测试集推理建议使用同一组尺度和翻转策略，然后只保存融合后argmax得到的单通道类别掩码。由于测试集无标签，不能宣称测试集mIoU；最终报告应同时列出70.21%的单尺度模型成绩与72.14%的TTA验证成绩，并注明TTA约增加6倍推理计算量。
+
+证据文件位于 `evaluations/resnet50_finetune_tta_01/`：`summary.json`记录完整配置和总体指标，`class_metrics.csv`记录21类TTA IoU及相对单尺度变化。

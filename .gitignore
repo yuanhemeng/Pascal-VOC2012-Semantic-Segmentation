@@ -30,6 +30,7 @@ checkpoints/
 outputs/
 experiments/
 error_analysis/
+evaluations/
 logs/
 runs/
 tensorboard/
