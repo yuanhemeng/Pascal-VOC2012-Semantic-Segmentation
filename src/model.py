@@ -7,7 +7,12 @@ from collections import OrderedDict
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torchvision.models import MobileNet_V3_Large_Weights, ResNet50_Weights, mobilenet_v3_large
+from torchvision.models import (
+    MobileNet_V3_Large_Weights,
+    ResNet50_Weights,
+    mobilenet_v3_large,
+    resnet50,
+)
 from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large, deeplabv3_resnet50
 from torchvision.models.segmentation.deeplabv3 import ASPP
 
@@ -18,7 +23,7 @@ ARCHITECTURES = ("deeplabv3", "deeplabv3plus")
 
 
 class DeepLabV3PlusDecoder(nn.Module):
-    """Fuse ASPP context with output-stride-4 MobileNetV3 features."""
+    """Fuse ASPP context with output-stride-4 encoder features."""
 
     def __init__(self, high_channels: int = 960, low_channels: int = 24) -> None:
         super().__init__()
@@ -72,6 +77,45 @@ class DeepLabV3PlusMobileNetV3(nn.Module):
         return OrderedDict(out=logits)
 
 
+class DeepLabV3PlusResNet50(nn.Module):
+    """DeepLabV3+ style decoder on an output-stride-16 ResNet50 encoder."""
+
+    low_level_name = "layer1"
+
+    def __init__(self, pretrained_backbone: bool = False) -> None:
+        super().__init__()
+        weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained_backbone else None
+        encoder = resnet50(
+            weights=weights,
+            replace_stride_with_dilation=(False, False, True),
+        )
+        self.backbone = nn.Sequential(OrderedDict((
+            ("conv1", encoder.conv1),
+            ("bn1", encoder.bn1),
+            ("relu", encoder.relu),
+            ("maxpool", encoder.maxpool),
+            ("layer1", encoder.layer1),
+            ("layer2", encoder.layer2),
+            ("layer3", encoder.layer3),
+            ("layer4", encoder.layer4),
+        )))
+        self.classifier = DeepLabV3PlusDecoder(high_channels=2048, low_channels=256)
+
+    def forward(self, inputs: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
+        input_size = inputs.shape[-2:]
+        low = None
+        features = inputs
+        for name, block in self.backbone.named_children():
+            features = block(features)
+            if name == self.low_level_name:
+                low = features
+        if low is None:
+            raise RuntimeError("ResNet50 low-level feature was not produced")
+        logits = self.classifier(features, low)
+        logits = F.interpolate(logits, size=input_size, mode="bilinear", align_corners=False)
+        return OrderedDict(out=logits)
+
+
 def build_deeplabv3(*, pretrained_backbone: bool = False, backbone: str = "resnet50"):
     """Build the existing 21-class torchvision DeepLabV3 baseline."""
     if backbone == "resnet50":
@@ -98,7 +142,9 @@ def build_segmentation_model(
     if architecture == "deeplabv3":
         return build_deeplabv3(pretrained_backbone=pretrained_backbone, backbone=backbone)
     if architecture == "deeplabv3plus":
-        if backbone != "mobilenet_v3_large":
-            raise ValueError("deeplabv3plus currently supports only mobilenet_v3_large")
-        return DeepLabV3PlusMobileNetV3(pretrained_backbone=pretrained_backbone)
+        if backbone == "mobilenet_v3_large":
+            return DeepLabV3PlusMobileNetV3(pretrained_backbone=pretrained_backbone)
+        if backbone == "resnet50":
+            return DeepLabV3PlusResNet50(pretrained_backbone=pretrained_backbone)
+        raise ValueError(f"Unsupported DeepLabV3+ backbone: {backbone}")
     raise ValueError(f"Unsupported architecture: {architecture}")

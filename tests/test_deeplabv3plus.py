@@ -31,9 +31,9 @@ class TestDeepLabV3Plus(unittest.TestCase):
         self.assertEqual(selected, ["14", "15", "16"])
         self.assertTrue(all(parameter.requires_grad for parameter in model.classifier.parameters()))
 
-    def test_rejects_unsupported_backbone(self):
-        with self.assertRaisesRegex(ValueError, "only mobilenet"):
-            build_segmentation_model(architecture="deeplabv3plus", backbone="resnet50")
+    def test_rejects_unknown_backbone(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported DeepLabV3\+ backbone"):
+            build_segmentation_model(architecture="deeplabv3plus", backbone="unknown")
 
 
 if __name__ == "__main__":

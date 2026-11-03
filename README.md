@@ -332,13 +332,14 @@ experiments/
 
 ### 当前配置
 
-- 模型：DeepLabV3-MobileNetV3-Large，已完成20轮 CPU 全量基线训练
-- 骨干网络：CPU 基线使用 MobileNetV3-Large（ImageNet 预训练）
+- 当前全局最佳模型：DeepLabV3+式浅层融合解码器 + ImageNet预训练ResNet50，第18轮验证mIoU为68.48%
+- 历史CPU基线：DeepLabV3-MobileNetV3-Large，已完成20轮全量训练
+- 当前全局最佳权重：`experiments/deeplabv3plus_resnet50_01/best.pth`；不能使用第20轮`last.pth`替代
 - 输入尺寸：CPU 基线使用 256 × 256；数据管线默认值为 384 × 384
 - 训练集数量：1464
 - 验证集数量：1449
 - 测试集数量：400
-- 损失函数：交叉熵，忽略标签 255
+- 当前实验损失函数：交叉熵 + Dice Loss；标签255仍作为忽略区域
 - 优化器：AdamW
 - 随机种子：预处理检查使用42
 - 数据审计：通过，训练/验证无重叠，图片标签无缺失或尺寸不一致
@@ -352,6 +353,9 @@ experiments/
 - 验证集错误分析：已用 `finetune_gpu_02/best.pth` 完整分析1449张验证图；重新计算mIoU为56.8368%，与训练记录一致。椅子、自行车、沙发、盆栽IoU分别为19.16%、30.17%、34.06%、35.29%，详细分析见 `report_sections/10_验证集错误分析与下一步.md`
 - 浅层融合解码器结果：`deeplabv3plus_decoder_01` 冻结MobileNetV3骨干训练20轮，第20轮最佳验证mIoU为58.02%、像素准确率88.67%，较相同设置的DeepLabV3提高2.34个百分点，刷新当前最佳
 - 新解码器错误分析：完整覆盖1449张验证图，mIoU与训练记录一致；自行车检出和区域质量同时改善，盆栽/沙发以precision下降换取recall提高，椅子仍是主要未解决类别
+- DeepLabV3+骨干微调结果：`deeplabv3plus_finetune_01` 第10轮最佳mIoU为58.99%、像素准确率89.27%，是当前MobileNetV3路线最佳
+- 低学习率收尾结果：`deeplabv3plus_polish_01` 第3轮最佳mIoU为58.92%，未超过58.99%；停止继续训练，保留 `deeplabv3plus_finetune_01/best.pth`
+- ResNet50骨干结果：`deeplabv3plus_resnet50_01` 冻结ImageNet预训练ResNet50训练20轮，第18轮最佳mIoU为68.48%、像素准确率92.07%，较MobileNet微调最佳提高9.49个百分点，刷新当前全局最佳；详细结果见`report_sections/12_低学习率收尾与ResNet50实验结果.md`
 
 ### 实验结果摘要
 
@@ -362,7 +366,10 @@ experiments/
 | high_resolution_gpu_01 | 余弦退火基线 + 384×384输入 + RTX 4090 D | 19 | 55.19% | 87.70% | 否 | 20轮完整训练；测试集尚未推理 |
 | highres_dice_01 | 384×384 + 余弦退火 + CE与Dice Loss | 17 | 55.68% | 87.77% | 否 | 20轮完整训练；测试集尚未推理 |
 | finetune_gpu_02 | 从高分辨率Dice最佳权重微调骨干最后3个模块 | 微调8 | 56.84% | 88.20% | 否 | 10轮完整微调；已完成验证集错误分析 |
-| deeplabv3plus_decoder_01 | 384×384 + CE与Dice + 浅层特征融合解码器，骨干冻结 | 20 | **58.02%** | **88.67%** | **当前最佳** | 20轮完整训练；下一步微调骨干最后3块 |
+| deeplabv3plus_decoder_01 | 384×384 + CE与Dice + 浅层特征融合解码器，骨干冻结 | 20 | 58.02% | 88.67% | 否 | 20轮完整训练 |
+| deeplabv3plus_finetune_01 | DeepLabV3+ + 微调MobileNet最后3块 | 微调10 | **58.99%** | **89.27%** | **当前MobileNet最佳** | 10轮完整微调 |
+| deeplabv3plus_polish_01 | 从58.99%权重继续5轮低学习率收尾 | 收尾3 | 58.92% | 89.19% | 否 | 未刷新最佳，停止继续训练 |
+| deeplabv3plus_resnet50_01 | DeepLabV3+ + 冻结ResNet50骨干，384×384 | 18 | **68.48%** | **92.07%** | **当前全局最佳** | 20轮完整训练；应使用第18轮best.pth |
 
 ### 待解决问题
 
@@ -384,7 +391,10 @@ experiments/
 - [x] 实现并测试DeepLabV3+阶段B专用启动器
 - [x] 完成DeepLabV3+骨干后段微调实验
 - [x] 实现并测试5轮低学习率收尾启动器
-- [ ] 完成5轮低学习率收尾实验
+- [x] 完成5轮低学习率收尾实验（未刷新最佳）
+- [x] 实现并测试DeepLabV3+ ResNet50骨干
+- [x] 完成冻结ResNet50骨干的20轮对照实验
+- [ ] 完成ResNet50 layer4微调实验
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字

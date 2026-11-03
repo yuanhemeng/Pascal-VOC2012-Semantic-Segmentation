@@ -107,8 +107,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("dice-weight must be positive when --loss ce_dice is used")
     if args.unfreeze_last_blocks and not args.freeze_backbone:
         parser.error("--unfreeze-last-blocks requires --freeze-backbone")
-    if args.architecture == "deeplabv3plus" and args.backbone != "mobilenet_v3_large":
-        parser.error("--architecture deeplabv3plus currently requires --backbone mobilenet_v3_large")
     if args.init_from and args.random_init:
         parser.error("--init-from and --random-init cannot be combined")
     if (args.max_train_batches or args.max_val_batches) and not args.no_checkpoints:
