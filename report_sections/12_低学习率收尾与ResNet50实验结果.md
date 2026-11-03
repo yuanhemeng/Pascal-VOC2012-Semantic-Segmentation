@@ -203,7 +203,20 @@ python evaluate_tta.py --device cuda --checkpoint experiments/deeplabv3plus_resn
 
 TTA使21个类别IoU全部提高，没有类别退化，因此提升具有一致性，不是少数类别或背景单独拉动。TTA不产生新checkpoint：模型权重仍是第8轮 `best.pth`，72.14%应表述为“该权重使用多尺度水平翻转TTA后的验证结果”，不能写成训练模型单尺度成绩。
 
-### 12.11.2 逐类变化
+### 12.11.2 边界损失对照实验
+
+本实验从70.21%的第8轮权重初始化，仅将CE+Dice改为边界加权CE+Dice。标签类别变化处向外扩张3像素，边界交叉熵权重设为2，忽略标签255不参与损失。其余配置与layer4微调基线相同，训练5轮。
+
+```bash
+python run_boundary_loss.py --device cuda --smoke
+python run_boundary_loss.py --device cuda
+```
+
+正式结果保存在 `experiments/resnet50_boundary_loss_01/`。最佳为第3轮，mIoU 70.2088%、像素准确率92.7621%；标准单尺度基线为70.2065%、92.6359%。mIoU仅差+0.0023个百分点，实际持平。
+
+边界损失权重运行相同三尺度翻转TTA后得到72.0503%、像素准确率93.3980%；标准模型TTA为72.1406%、93.3299%。边界TTA的mIoU低0.0902个百分点。边界损失单尺度有12类提高、8类下降、1类近似不变；边界TTA相对标准TTA有12类提高、9类下降，摩托车、盆栽和椅子退化较明显。因此不采用边界损失方案，也不继续搜索边界宽度和权重；最终保留标准CE+Dice权重及标准TTA推理。
+
+### 12.11.3 标准TTA逐类变化
 
 | 类别 | 单尺度IoU | TTA IoU | 变化（百分点） |
 |---|---:|---:|---:|
@@ -217,8 +230,40 @@ TTA使21个类别IoU全部提高，没有类别退化，因此提升具有一致
 
 提升最大的类别是船（+3.75）、瓶子（+3.21）、电视显示器（+2.82）和沙发（+2.75）。“椅子”仍是最低类别，但也提高2.05个百分点；这说明多尺度融合能缓解尺度和边界误差，却没有根除椅子与背景、沙发和人物之间的语义混淆。
 
-### 12.11.3 结论与使用边界
+### 12.11.4 结论与使用边界
 
 完整TTA结果有效，应作为当前最高验证推理方案。课程测试集推理建议使用同一组尺度和翻转策略，然后只保存融合后argmax得到的单通道类别掩码。由于测试集无标签，不能宣称测试集mIoU；最终报告应同时列出70.21%的单尺度模型成绩与72.14%的TTA验证成绩，并注明TTA约增加6倍推理计算量。
 
 证据文件位于 `evaluations/resnet50_finetune_tta_01/`：`summary.json`记录完整配置和总体指标，`class_metrics.csv`记录21类TTA IoU及相对单尺度变化。
+
+## 12.12 512×512微调实验（已完成）
+
+当前训练预处理已包含随机缩放、随机裁剪和同步水平翻转。下一项只提高输入尺寸至512×512，从70.21%的第8轮最佳权重初始化，仍只训练ResNet50 layer4和分割头，使用标准CE+Dice，不再叠加边界权重。目标是保留更多椅子、盆栽和自行车的空间细节。
+
+先运行batch 4冒烟检查：
+
+```bash
+python train_baseline.py --device cuda --architecture deeplabv3plus --backbone resnet50 --freeze-backbone --unfreeze-last-blocks 1 --init-from experiments/deeplabv3plus_resnet50_finetune_01/best.pth --image-size 512 --batch-size 4 --lr 0.0001 --backbone-lr 0.00001 --lr-scheduler cosine --min-lr 0.000001 --loss ce_dice --dice-weight 1.0 --epochs 1 --max-train-batches 1 --max-val-batches 1 --no-checkpoints --output-dir experiments/resnet50_512_smoke
+```
+
+该实验已经完成。10轮均完整处理1464张训练图和1449张验证图，partial_run=False。
+
+```bash
+python train_baseline.py --device cuda --architecture deeplabv3plus --backbone resnet50 --freeze-backbone --unfreeze-last-blocks 1 --init-from experiments/deeplabv3plus_resnet50_finetune_01/best.pth --image-size 512 --batch-size 4 --lr 0.0001 --backbone-lr 0.00001 --lr-scheduler cosine --min-lr 0.000001 --loss ce_dice --dice-weight 1.0 --epochs 10 --log-every 20 --output-dir experiments/resnet50_512_finetune_01
+```
+
+最佳为第9轮，mIoU 70.5315%、像素准确率92.9704%，相对384输入单尺度70.2065%提高0.3248个百分点。第10轮回落至70.12%，因此选第9轮best.pth。
+
+21类中12类提升、9类下降。自行车从52.89%升至59.40%（+6.51个百分点），椅子从24.78%升至27.17%（+2.39）；牛、马、摩托车分别下降3.26、3.38、2.33个百分点。512输入有小幅总体收益，但类别间存在权衡，尚未超过384输入TTA的72.14%。
+
+已对512最佳权重运行多尺度翻转TTA。checkpoint基础尺寸为512，因此三个尺度对应384、512、640像素：
+
+```bash
+python evaluate_tta.py --device cuda --checkpoint experiments/resnet50_512_finetune_01/best.pth --scales 0.75,1.0,1.25 --output-dir evaluations/resnet50_512_tta_01
+```
+
+完整评估覆盖1449张验证图，`partial_analysis=false`。TTA mIoU为**72.6513%**，像素准确率为**93.6479%**；相对512单尺度70.5315%提高2.1198个百分点，相对384多尺度翻转TTA的72.1406%再提高0.5107个百分点。这是当前最高验证推理成绩。
+
+21类中20类相对512单尺度提升，椅子下降约0.58个百分点；提升较明显的类别包括瓶子+4.42、牛+3.45、船+3.57、电视显示器+2.97个百分点。总体收益为正，但椅子仍是弱类，不能说所有类别都改善。
+
+TTA不产生新模型权重。单尺度ResNet50权重仍为`experiments/resnet50_512_finetune_01/best.pth`（70.53%）；72.65%是该权重采用0.75/1.0/1.25尺度与水平翻转、融合logits后的验证结果。下一步停止新增训练实验，把同一TTA融合流程接入400张测试图预测，再检查掩码格式和打包提交。

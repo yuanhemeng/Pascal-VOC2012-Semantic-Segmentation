@@ -69,3 +69,9 @@ temp/
 
 #report
 *.docx
+
+#舍弃实验
+/dinov3_psp_experiment
+/run_dinov3_psp.py
+/tests/test_dinov3_launcher.py
+/report_sections/13_DINOv3_PSP实验计划.md

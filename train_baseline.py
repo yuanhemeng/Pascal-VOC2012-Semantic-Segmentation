@@ -63,8 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=positive_int, default=2)
     parser.add_argument("--image-size", type=positive_int, default=IMAGE_SIZE)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--loss", choices=("ce", "ce_dice"), default="ce")
+    parser.add_argument("--loss", choices=("ce", "ce_dice", "boundary_ce_dice"), default="ce")
     parser.add_argument("--dice-weight", type=float, default=1.0)
+    parser.add_argument("--boundary-weight", type=float, default=2.0,
+                        help="Cross-entropy weight inside the boundary band")
+    parser.add_argument("--boundary-width", type=positive_int, default=3,
+                        help="Boundary dilation radius in pixels")
     parser.add_argument(
         "--lr-scheduler",
         choices=("none", "cosine"),
@@ -103,8 +107,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("backbone-lr must be positive and finite")
     if not math.isfinite(args.dice_weight) or args.dice_weight < 0:
         parser.error("dice-weight must be nonnegative and finite")
-    if args.loss == "ce_dice" and args.dice_weight == 0:
-        parser.error("dice-weight must be positive when --loss ce_dice is used")
+    if args.loss in ("ce_dice", "boundary_ce_dice") and args.dice_weight == 0:
+        parser.error("dice-weight must be positive for a Dice-combined loss")
+    if not math.isfinite(args.boundary_weight) or args.boundary_weight < 1:
+        parser.error("boundary-weight must be finite and at least 1")
     if args.unfreeze_last_blocks and not args.freeze_backbone:
         parser.error("--unfreeze-last-blocks requires --freeze-backbone")
     if args.init_from and args.random_init:
@@ -146,8 +152,46 @@ def multiclass_dice_loss(logits, target, ignore_index=IGNORE_INDEX, smooth=1.0):
     return 1 - dice[present].mean()
 
 
-def segmentation_loss(logits, target, loss_name, dice_weight):
-    cross_entropy = F.cross_entropy(logits, target, ignore_index=IGNORE_INDEX)
+def segmentation_boundary_mask(target, ignore_index=IGNORE_INDEX, width=3):
+    """Return a dilated band around valid semantic-label transitions."""
+    if target.ndim != 3:
+        raise ValueError("target must have shape [B, H, W]")
+    valid = target != ignore_index
+    boundary = torch.zeros_like(valid)
+    horizontal = valid[:, :, 1:] & valid[:, :, :-1] & (target[:, :, 1:] != target[:, :, :-1])
+    vertical = valid[:, 1:, :] & valid[:, :-1, :] & (target[:, 1:, :] != target[:, :-1, :])
+    boundary[:, :, 1:] |= horizontal
+    boundary[:, :, :-1] |= horizontal
+    boundary[:, 1:, :] |= vertical
+    boundary[:, :-1, :] |= vertical
+    if width:
+        kernel = 2 * width + 1
+        boundary = F.max_pool2d(
+            boundary.float().unsqueeze(1), kernel_size=kernel, stride=1, padding=width,
+        ).squeeze(1).bool()
+    return boundary & valid
+
+
+def boundary_weighted_cross_entropy(logits, target, boundary_weight=2.0, boundary_width=3):
+    """Cross entropy normalized by the total valid pixel weight."""
+    loss_map = F.cross_entropy(logits, target, ignore_index=IGNORE_INDEX, reduction="none")
+    valid = target != IGNORE_INDEX
+    boundary = segmentation_boundary_mask(target, width=boundary_width)
+    weights = torch.ones_like(loss_map).masked_fill(boundary, boundary_weight)
+    denominator = weights[valid].sum()
+    if denominator.item() == 0:
+        return logits.new_zeros(())
+    return (loss_map * weights * valid).sum() / denominator
+
+
+def segmentation_loss(logits, target, loss_name, dice_weight,
+                      boundary_weight=2.0, boundary_width=3):
+    if loss_name == "boundary_ce_dice":
+        cross_entropy = boundary_weighted_cross_entropy(
+            logits, target, boundary_weight=boundary_weight, boundary_width=boundary_width,
+        )
+    else:
+        cross_entropy = F.cross_entropy(logits, target, ignore_index=IGNORE_INDEX)
     if loss_name == "ce":
         return cross_entropy
     return cross_entropy + dice_weight * multiclass_dice_loss(logits, target)
@@ -169,7 +213,8 @@ def configure_backbone_training(model, freeze_backbone: bool, unfreeze_last_bloc
     return [name for name, block in blocks if any(p.requires_grad for p in block.parameters())]
 
 
-def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone, unfreeze_last_blocks, loss_name, dice_weight):
+def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze_backbone,
+                unfreeze_last_blocks, loss_name, dice_weight, boundary_weight, boundary_width):
     model.train()
     if freeze_backbone:
         # Keep backbone BatchNorm running statistics fixed. The last blocks
@@ -189,7 +234,9 @@ def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze
         logits = model(images)["out"]
         if logits.shape[:2] != (images.shape[0], NUM_CLASSES) or logits.shape[-2:] != masks.shape[-2:]:
             raise RuntimeError(f"Unexpected output shape: {tuple(logits.shape)}")
-        loss = segmentation_loss(logits, masks, loss_name, dice_weight)
+        loss = segmentation_loss(
+            logits, masks, loss_name, dice_weight, boundary_weight, boundary_width,
+        )
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite training loss in batch {batch_index}")
         optimizer.zero_grad(set_to_none=True)
@@ -206,7 +253,8 @@ def train_epoch(model, loader, optimizer, device, max_batches, log_every, freeze
 
 
 @torch.inference_mode()
-def validate(model, loader, device, max_batches, writer, epoch, loss_name, dice_weight):
+def validate(model, loader, device, max_batches, writer, epoch, loss_name, dice_weight,
+             boundary_weight, boundary_width):
     model.eval()
     metrics = SegmentationMetrics(NUM_CLASSES)
     loss_total = 0.0
@@ -220,7 +268,9 @@ def validate(model, loader, device, max_batches, writer, epoch, loss_name, dice_
         target = mask.unsqueeze(0).to(device)
         if logits.shape[-2:] != target.shape[-2:]:
             raise RuntimeError("Validation logits and original mask have different sizes")
-        loss = segmentation_loss(logits, target, loss_name, dice_weight)
+        loss = segmentation_loss(
+            logits, target, loss_name, dice_weight, boundary_weight, boundary_width,
+        )
         if not torch.isfinite(loss):
             raise RuntimeError(f"Non-finite validation loss in image {batch_index}")
         prediction = logits.argmax(dim=1).squeeze(0).cpu()
@@ -295,6 +345,9 @@ def main() -> None:
     if args.unfreeze_last_blocks:
         config["unfreeze_last_blocks"] = args.unfreeze_last_blocks
         config["backbone_lr"] = args.backbone_lr
+    if args.loss == "boundary_ce_dice":
+        config["boundary_weight"] = args.boundary_weight
+        config["boundary_width"] = args.boundary_width
     if args.init_from:
         if not args.init_from.is_file():
             raise FileNotFoundError(f"Initial checkpoint not found: {args.init_from}")
@@ -390,11 +443,11 @@ def main() -> None:
                 train_loss, train_seen = train_epoch(
                     model, train_loader, optimizer, device, args.max_train_batches,
                     args.log_every, args.freeze_backbone, args.unfreeze_last_blocks,
-                    args.loss, args.dice_weight,
+                    args.loss, args.dice_weight, args.boundary_weight, args.boundary_width,
                 )
                 val_loss, metrics, val_seen = validate(
                     model, val_loader, device, args.max_val_batches, writer, epoch,
-                    args.loss, args.dice_weight,
+                    args.loss, args.dice_weight, args.boundary_weight, args.boundary_width,
                 )
                 miou, accuracy = metrics.mean_iou(), metrics.pixel_accuracy()
                 if not math.isfinite(miou) or not math.isfinite(accuracy):
