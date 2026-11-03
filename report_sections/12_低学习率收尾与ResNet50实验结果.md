@@ -116,3 +116,48 @@ python train_baseline.py --device cuda --architecture deeplabv3plus --backbone r
 - `tests/test_deeplabv3plus_resnet50.py`、`tests/test_resnet50_runner.py`：结构与命令测试。
 - `experiments/deeplabv3plus_resnet50_01/`：20轮配置、日志、最佳与末轮权重和逐类IoU。
 - `report_sections/assets/deeplabv3plus_resnet50_01_curves.png`：由原始 `metrics.csv` 生成的训练曲线。
+
+## 12.9 ResNet50 layer4微调结果
+
+从冻结骨干实验第18轮 `best.pth` 初始化，只解冻ResNet50的 `layer4`，其余骨干层和BatchNorm运行统计保持冻结。分割头学习率为 `1e-4`，`layer4` 学习率为 `1e-5`，使用10轮余弦退火。10轮均完整处理1464张训练图和1449张验证图，`partial_run=False`，累计耗时约544.99秒。
+
+| 微调轮次 | 训练loss | 验证loss | 验证mIoU | 像素准确率 |
+|---:|---:|---:|---:|---:|
+| 1 | 0.2904 | 0.4811 | 67.23% | 91.71% |
+| 3 | 0.2458 | 0.4661 | 68.62% | 92.03% |
+| 5 | 0.2209 | 0.4641 | 68.74% | 92.07% |
+| 6 | 0.1988 | 0.4513 | 69.45% | 92.45% |
+| 7 | 0.1929 | 0.4490 | 69.73% | 92.55% |
+| **8** | **0.1853** | **0.4421** | **70.21%** | 92.64% |
+| 9 | 0.1721 | 0.4460 | 70.17% | 92.73% |
+| 10 | 0.1777 | 0.4514 | 70.04% | **92.75%** |
+
+第8轮同时取得最高mIoU和最低验证loss，最佳mIoU为 `0.7020652608`，即70.21%。第9、10轮mIoU轻微回落，因此正式模型应使用第8轮 `best.pth`，不能使用第10轮 `last.pth`。相对冻结ResNet50的68.48%，微调提高约1.73个百分点；相对MobileNetV3全局最佳58.99%，提高约11.22个百分点。
+
+![ResNet50 layer4微调曲线](assets/deeplabv3plus_resnet50_finetune_01_curves.png)
+
+*图12-2　ResNet50 layer4微调的原始逐轮loss、mIoU和像素准确率，未进行平滑处理。*
+
+逐类对比显示21类中18类提高，3类下降。提升较明显的类别包括电视显示器+5.28、椅子+3.73、羊+3.41、飞机+3.31、沙发+2.64、盆栽+2.57个百分点；自行车、狗和摩托车分别下降1.19、0.49和0.64个百分点。椅子仍是最低类别，但从21.05%提高到24.78%。微调改善了多数类别和弱类别，不是只提高背景。
+
+当前全局最佳权重更新为：
+
+```text
+experiments/deeplabv3plus_resnet50_finetune_01/best.pth
+验证mIoU：70.2065%
+像素准确率：92.6359%
+最佳微调轮次：8
+```
+
+第8轮后已出现轻微回落，不建议继续增加相同配置的训练轮数。下一步先对该最终候选权重运行完整错误分析，再决定是否值得进入成本更高的DINOv3路线；课程作业交付则可直接进入400张测试图推理。
+
+错误分析命令：
+
+```bash
+python analyze_validation_errors.py --device cuda --checkpoint experiments/deeplabv3plus_resnet50_finetune_01/best.pth --target-classes chair,bicycle,sofa,pottedplant --samples-per-class 8 --output-dir error_analysis/deeplabv3plus_resnet50_finetune_01
+```
+
+新增证据：
+
+- `experiments/deeplabv3plus_resnet50_finetune_01/`：10轮配置、日志、权重和逐类IoU。
+- `report_sections/assets/deeplabv3plus_resnet50_finetune_01_curves.png`：微调曲线。

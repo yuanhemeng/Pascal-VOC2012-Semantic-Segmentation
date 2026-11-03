@@ -332,9 +332,9 @@ experiments/
 
 ### 当前配置
 
-- 当前全局最佳模型：DeepLabV3+式浅层融合解码器 + ImageNet预训练ResNet50，第18轮验证mIoU为68.48%
+- 当前全局最佳模型：DeepLabV3+式浅层融合解码器 + ResNet50 layer4微调，第8个微调轮次验证mIoU为70.21%
 - 历史CPU基线：DeepLabV3-MobileNetV3-Large，已完成20轮全量训练
-- 当前全局最佳权重：`experiments/deeplabv3plus_resnet50_01/best.pth`；不能使用第20轮`last.pth`替代
+- 当前全局最佳权重：`experiments/deeplabv3plus_resnet50_finetune_01/best.pth`；不能使用第10轮`last.pth`替代
 - 输入尺寸：CPU 基线使用 256 × 256；数据管线默认值为 384 × 384
 - 训练集数量：1464
 - 验证集数量：1449
@@ -356,6 +356,7 @@ experiments/
 - DeepLabV3+骨干微调结果：`deeplabv3plus_finetune_01` 第10轮最佳mIoU为58.99%、像素准确率89.27%，是当前MobileNetV3路线最佳
 - 低学习率收尾结果：`deeplabv3plus_polish_01` 第3轮最佳mIoU为58.92%，未超过58.99%；停止继续训练，保留 `deeplabv3plus_finetune_01/best.pth`
 - ResNet50骨干结果：`deeplabv3plus_resnet50_01` 冻结ImageNet预训练ResNet50训练20轮，第18轮最佳mIoU为68.48%、像素准确率92.07%，较MobileNet微调最佳提高9.49个百分点，刷新当前全局最佳；详细结果见`report_sections/12_低学习率收尾与ResNet50实验结果.md`
+- ResNet50 layer4微调结果：`deeplabv3plus_resnet50_finetune_01` 第8轮最佳mIoU为70.21%、像素准确率92.64%，较冻结ResNet50提高1.73个百分点，刷新当前全局最佳
 
 ### 实验结果摘要
 
@@ -370,6 +371,7 @@ experiments/
 | deeplabv3plus_finetune_01 | DeepLabV3+ + 微调MobileNet最后3块 | 微调10 | **58.99%** | **89.27%** | **当前MobileNet最佳** | 10轮完整微调 |
 | deeplabv3plus_polish_01 | 从58.99%权重继续5轮低学习率收尾 | 收尾3 | 58.92% | 89.19% | 否 | 未刷新最佳，停止继续训练 |
 | deeplabv3plus_resnet50_01 | DeepLabV3+ + 冻结ResNet50骨干，384×384 | 18 | **68.48%** | **92.07%** | **当前全局最佳** | 20轮完整训练；应使用第18轮best.pth |
+| deeplabv3plus_resnet50_finetune_01 | 从68.48%权重微调ResNet50 layer4 | 微调8 | **70.21%** | **92.64%** | **当前全局最佳** | 10轮完整微调；第9、10轮轻微回落 |
 
 ### 待解决问题
 
@@ -394,7 +396,8 @@ experiments/
 - [x] 完成5轮低学习率收尾实验（未刷新最佳）
 - [x] 实现并测试DeepLabV3+ ResNet50骨干
 - [x] 完成冻结ResNet50骨干的20轮对照实验
-- [ ] 完成ResNet50 layer4微调实验
+- [x] 完成ResNet50 layer4微调实验
+- [ ] 完成70.21%最终候选权重的完整错误分析
 - [ ] 完成400张测试集推理
 - [ ] 整理最终压缩包
 - [ ] 完成报告并核对全部数字
